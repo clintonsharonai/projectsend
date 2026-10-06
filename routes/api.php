@@ -6,6 +6,7 @@ use App\Modules\Api\Events\ApiModule;
 use App\Modules\Api\Events\RegisteringApiModules;
 use App\Modules\Api\Http\Controllers\CurrentTokenController;
 use App\Modules\Api\Http\Controllers\MeController;
+use App\Modules\Api\Http\Controllers\TokensController;
 use App\Modules\Audit\Http\Controllers\Api\ActivityController;
 use App\Modules\Api\Http\Controllers\OpenApiController;
 use App\Modules\Clients\Http\Controllers\Api\ClientsController;
@@ -63,6 +64,14 @@ Route::middleware(['auth:sanctum', 'api-active', 'staff-token'])->group(function
     // token is a web-only action: doing it here would let a leaked token
     // lock the real owner out of their own integrations.
     Route::delete('tokens/current', CurrentTokenController::class)->name('api.tokens.current.destroy');
+
+    // Mint a new token for the calling user. Gated by create_api_tokens so
+    // only a credential explicitly granted that ability can mint; a minted
+    // token can never carry create_api_tokens itself (see TokensController),
+    // so the chain stops at the issuer.
+    Route::post('tokens', [TokensController::class, 'store'])
+        ->middleware('token-can:create_api_tokens')
+        ->name('api.tokens.store');
 
     /*
     |----------------------------------------------------------------------

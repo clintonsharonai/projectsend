@@ -70,6 +70,7 @@ enum Permission: string
     case ViewSystemInfo = 'view_system_info';
     case ViewDashboardCounters = 'view_dashboard_counters';
     case ManageUpdates = 'manage_updates';
+    case CreateApiTokens = 'create_api_tokens';
 
     // Custom assets
     case CreateAssets = 'create_assets';
@@ -128,6 +129,7 @@ enum Permission: string
             self::ViewSystemInfo => 'View system information',
             self::ViewDashboardCounters => 'View dashboard counters',
             self::ManageUpdates => 'Manage updates',
+            self::CreateApiTokens => 'Create API tokens',
             self::CreateAssets => 'Create custom assets',
             self::EditAssets => 'Edit custom assets',
             self::DeleteAssets => 'Delete custom assets',
@@ -220,7 +222,8 @@ enum Permission: string
             self::ViewNews,
             self::ViewSystemInfo,
             self::ViewDashboardCounters,
-            self::ManageUpdates => PermissionCategory::System,
+            self::ManageUpdates,
+            self::CreateApiTokens => PermissionCategory::System,
 
             self::CreateAssets,
             self::EditAssets,

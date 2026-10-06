@@ -10,6 +10,7 @@ use App\Modules\Api\Auth\ApiTokens;
 use App\Modules\Api\Auth\TokenAbilities;
 use App\Modules\Audit\Action;
 use App\Modules\Audit\ActivityLogger;
+use App\Modules\Identity\Permissions\Permission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -53,7 +54,9 @@ class ApiTokensController extends Controller
         assert($user !== null);
 
         return Inertia::render('settings/api-tokens/create', [
-            'available_abilities' => $this->availableAbilities($user),
+            // No-chaining: a freshly minted token can never carry
+            // create_api_tokens, so it is not offered on this form.
+            'available_abilities' => $this->availableAbilities($user, $this->abilities->grantableFor($user)),
             'defaults' => [
                 'expires_in_days' => (int) config('api.tokens.default_days'),
                 'max_days' => (int) config('api.tokens.max_days'),
@@ -81,7 +84,7 @@ class ApiTokensController extends Controller
 
         $accessToken = $this->findOwnToken($user, $token);
 
-        $available = $this->abilities->availableFor($user);
+        $available = $this->editableAbilities($user, $accessToken);
         $current = $accessToken->abilities ?? [];
 
         return Inertia::render('settings/api-tokens/edit', [
@@ -105,7 +108,7 @@ class ApiTokensController extends Controller
                 // surprise.
                 'retired_abilities' => array_values(array_diff($current, $available)),
             ],
-            'available_abilities' => $this->availableAbilities($user),
+            'available_abilities' => $this->availableAbilities($user, $available),
             'defaults' => [
                 'expires_in_days' => (int) config('api.tokens.default_days'),
                 'max_days' => (int) config('api.tokens.max_days'),
@@ -120,7 +123,10 @@ class ApiTokensController extends Controller
 
         $accessToken = $this->findOwnToken($user, $token);
 
-        $grantedKeys = $this->abilities->availableFor($user);
+        // No-chaining on the gain axis: a token may keep a create_api_tokens
+        // it already carries (editing the issuer's own issuer token must not
+        // silently strip it), but it may not be granted one it lacks.
+        $grantedKeys = $this->editableAbilities($user, $accessToken);
         $maxDays = (int) config('api.tokens.max_days');
 
         $validated = $request->validate([
@@ -163,7 +169,10 @@ class ApiTokensController extends Controller
         assert($user !== null);
 
         // Both gates, not just the role's permissions — see TokenAbilities.
-        $grantedKeys = $this->abilities->availableFor($user);
+        // grantableFor is the no-chaining ceiling: a token minted here can
+        // never carry create_api_tokens, so this screen is not a back door
+        // to a chaining token.
+        $grantedKeys = $this->abilities->grantableFor($user);
         $maxDays = (int) config('api.tokens.max_days');
 
         $validated = $request->validate([
@@ -267,13 +276,25 @@ class ApiTokensController extends Controller
      * Grouped by category so the form reads like the roles screen rather
      * than a flat wall of forty checkboxes.
      *
+     * @param  list<string>|null  $keys  When given, the abilities to offer
+     *                                   (already scoped by the caller — the
+     *                                   no-chaining ceiling for minting, the
+     *                                   per-token editable set for editing);
+     *                                   when null, the full availableFor() set.
      * @return list<array{category: string, label: string, abilities: list<array{key: string, label: string}>}>
      */
-    private function availableAbilities(User $user): array
+    private function availableAbilities(User $user, ?array $keys = null): array
     {
         $groups = [];
 
-        foreach ($this->abilities->casesFor($user) as $permission) {
+        $cases = $keys === null
+            ? $this->abilities->casesFor($user)
+            : array_values(array_filter(
+                Permission::cases(),
+                fn (Permission $permission): bool => in_array($permission->value, $keys, true),
+            ));
+
+        foreach ($cases as $permission) {
             $groups[$permission->category()->value]['label'] = $permission->category()->label();
             $groups[$permission->category()->value]['abilities'][] = [
                 'key' => $permission->value,
@@ -290,5 +311,24 @@ class ApiTokensController extends Controller
             array_keys($groups),
             $groups,
         );
+    }
+
+    /**
+     * The abilities a token may carry after an edit: the no-chaining ceiling,
+     * plus create_api_tokens if the token already has it. That keeps editing
+     * the issuer's own issuer token from silently stripping its power, while
+     * still stopping a customer token from being widened into a chaining one.
+     *
+     * @return list<string>
+     */
+    private function editableAbilities(User $user, PersonalAccessToken $accessToken): array
+    {
+        $keys = $this->abilities->grantableFor($user);
+
+        if (in_array(Permission::CreateApiTokens->value, $accessToken->abilities ?? [], true)) {
+            $keys[] = Permission::CreateApiTokens->value;
+        }
+
+        return $keys;
     }
 }

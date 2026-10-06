@@ -54,6 +54,17 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
                   },
               ]
             : []),
+        // Shown only to an issuer — the route is gated on create_api_tokens,
+        // so a non-issuer would only ever see this entry 403.
+        ...(auth.permissions.includes('create_api_tokens')
+            ? [
+                  {
+                      title: t('Customer tokens'),
+                      url: '/settings/customer-tokens',
+                      icon: null,
+                  },
+              ]
+            : []),
     ];
 
     return (
