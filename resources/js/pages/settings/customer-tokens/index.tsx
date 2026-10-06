@@ -2,20 +2,20 @@ import { Head, Link, router } from '@inertiajs/react';
 import { useState } from 'react';
 
 import { ConfirmDialog } from '@/components/confirm-dialog';
-import HeadingSmall from '@/components/heading-small';
+import Heading from '@/components/heading';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useFormatDate } from '@/hooks/use-format-date';
 import { useTranslation } from '@/hooks/use-translation';
 import AppLayout from '@/layouts/app-layout';
-import SettingsLayout from '@/layouts/settings/layout';
 import { type BreadcrumbItem } from '@/types';
 
 interface CustomerToken {
     id: string;
     name: string;
-    abilities: string[];
+    folder_id: number | null;
+    folder_name: string | null;
     last_used_at: string | null;
     expires_at: string | null;
     expired: boolean;
@@ -44,71 +44,80 @@ export default function CustomerTokensIndex({ tokens, created_token }: Props) {
         <AppLayout breadcrumbs={breadcrumbs}>
             <Head title={t('Customer tokens')} />
 
-            <SettingsLayout>
-                <div className="space-y-6">
-                    <div className="flex items-start justify-between gap-4">
-                        <HeadingSmall
-                            title={t('Customer tokens')}
-                            description={t(
-                                'Tokens you mint for customers to upload through the API. Each is scoped to the permissions you grant it, and one can never mint tokens of its own.',
-                            )}
-                        />
-                        <Button asChild size="sm">
-                            <Link href={route('customer-tokens.create')}>{t('Create token')}</Link>
-                        </Button>
-                    </div>
-
-                    {created_token && (
-                        <Alert>
-                            <AlertTitle>{t('Copy your token now')}</AlertTitle>
-                            <AlertDescription className="space-y-3">
-                                <p>{t('This is the only time it will be shown. We store only a hash, so it cannot be recovered later.')}</p>
-                                <code className="bg-muted block w-full rounded p-2 font-mono text-xs break-all">{created_token.plain_text}</code>
-                                <Button type="button" size="sm" variant="outline" onClick={copy}>
-                                    {copied ? t('Copied') : t('Copy to clipboard')}
-                                </Button>
-                            </AlertDescription>
-                        </Alert>
-                    )}
-
-                    {tokens.length === 0 ? (
-                        <p className="text-muted-foreground text-sm">{t('You have not minted any customer tokens yet.')}</p>
-                    ) : (
-                        <ul className="divide-border divide-y">
-                            {tokens.map((token) => (
-                                <li key={token.id} className="flex items-start justify-between gap-4 py-3">
-                                    <div className="space-y-1">
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-sm font-medium">{token.name}</span>
-                                            {token.expired && <Badge variant="destructive">{t('Expired')}</Badge>}
-                                        </div>
-                                        <p className="text-muted-foreground text-xs">
-                                            {token.last_used_at ? t('Last used :date', { date: date(token.last_used_at) }) : t('Never used')}
-                                            {' · '}
-                                            {token.expires_at ? t('Expires :date', { date: date(token.expires_at) }) : t('Never expires')}
-                                        </p>
-                                        <p className="text-muted-foreground text-xs">{token.abilities.join(', ')}</p>
-                                    </div>
-
-                                    <div className="flex shrink-0 items-center gap-2">
-                                        <ConfirmDialog
-                                            trigger={
-                                                <Button variant="outline" size="sm">
-                                                    {t('Revoke')}
-                                                </Button>
-                                            }
-                                            title={t('Revoke this token?')}
-                                            description={t('Any customer using it will stop working immediately. This cannot be undone.')}
-                                            confirmLabel={t('Revoke')}
-                                            onConfirm={() => router.delete(route('customer-tokens.destroy', token.id), { preserveScroll: true })}
-                                        />
-                                    </div>
-                                </li>
-                            ))}
-                        </ul>
-                    )}
+            <div className="space-y-8 px-4 py-6">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                    <Heading
+                        title={t('Customer tokens')}
+                        description={t('Upload-only tokens, each bound to a single folder. A customer with the token can only push files into that folder.')}
+                    />
+                    <Button size="sm" asChild>
+                        <Link href={route('customer-tokens.create')}>{t('Create token')}</Link>
+                    </Button>
                 </div>
-            </SettingsLayout>
+
+                {created_token && (
+                    <Alert>
+                        <AlertTitle>{t('Copy your token now')}</AlertTitle>
+                        <AlertDescription className="space-y-3">
+                            <p>{t('This is the only time it will be shown. We store only a hash, so it cannot be recovered later.')}</p>
+                            <code className="bg-muted block w-full rounded p-2 font-mono text-xs break-all">{created_token.plain_text}</code>
+                            <Button type="button" size="sm" variant="outline" onClick={copy}>
+                                {copied ? t('Copied') : t('Copy to clipboard')}
+                            </Button>
+                        </AlertDescription>
+                    </Alert>
+                )}
+
+                {tokens.length === 0 ? (
+                    <p className="text-muted-foreground text-sm">{t('You have not minted any customer tokens yet.')}</p>
+                ) : (
+                    <div className="overflow-x-auto rounded-lg border">
+                        <table className="w-full text-sm">
+                            <thead className="bg-muted/50 text-left">
+                                <tr>
+                                    <th className="px-4 py-2 font-medium">{t('Name')}</th>
+                                    <th className="px-4 py-2 font-medium">{t('Folder')}</th>
+                                    <th className="px-4 py-2 font-medium">{t('Last used')}</th>
+                                    <th className="px-4 py-2 font-medium">{t('Expires')}</th>
+                                    <th className="px-4 py-2" />
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {tokens.map((token) => (
+                                    <tr key={token.id} className="border-t">
+                                        <td className="px-4 py-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className="font-medium">{token.name}</span>
+                                                {token.expired && <Badge variant="destructive">{t('Expired')}</Badge>}
+                                            </div>
+                                        </td>
+                                        <td className="text-muted-foreground px-4 py-2">{token.folder_name ?? '—'}</td>
+                                        <td className="text-muted-foreground px-4 py-2 whitespace-nowrap">
+                                            {token.last_used_at ? date(token.last_used_at) : t('Never')}
+                                        </td>
+                                        <td className="text-muted-foreground px-4 py-2 whitespace-nowrap">
+                                            {token.expires_at ? date(token.expires_at) : t('Never expires')}
+                                        </td>
+                                        <td className="px-4 py-2 text-right">
+                                            <ConfirmDialog
+                                                trigger={
+                                                    <Button variant="outline" size="sm">
+                                                        {t('Revoke')}
+                                                    </Button>
+                                                }
+                                                title={t('Revoke this token?')}
+                                                description={t('Any customer using it will stop working immediately. This cannot be undone.')}
+                                                confirmLabel={t('Revoke')}
+                                                onConfirm={() => router.delete(route('customer-tokens.destroy', token.id), { preserveScroll: true })}
+                                            />
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
         </AppLayout>
     );
 }

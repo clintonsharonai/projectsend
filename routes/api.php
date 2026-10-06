@@ -110,8 +110,12 @@ Route::middleware(['auth:sanctum', 'api-active', 'staff-token'])->group(function
     | so both keys appear here and the policy decides which one applies.
     |
     */
+    // `upload_only` is the customer upload token's key: it reaches this
+    // endpoint (and the chunked twin below) but none of the read routes, so
+    // a folder-bound token can push files in without being able to read the
+    // library. `upload` stays for ordinary tokens.
     Route::post('files', [FilesController::class, 'store'])
-        ->middleware(['token-can:upload', 'throttle:api-uploads'])
+        ->middleware(['token-can:upload,upload_only', 'throttle:api-uploads'])
         ->name('api.files.store');
 
     Route::patch('files/{file}', [FilesController::class, 'update'])
@@ -139,7 +143,7 @@ Route::middleware(['auth:sanctum', 'api-active', 'staff-token'])->group(function
     | CSRF to exempt it from.
     |
     */
-    Route::middleware(['token-can:upload', 'throttle:api-uploads'])->group(function () {
+    Route::middleware(['token-can:upload,upload_only', 'throttle:api-uploads'])->group(function () {
         Route::post('uploads', [ChunkedUploadsController::class, 'store'])->name('api.uploads.store');
         Route::get('uploads/{session}/parts/{part}/sign', [ChunkedUploadsController::class, 'signPart'])
             ->name('api.uploads.parts.sign');
