@@ -197,13 +197,21 @@ export function AppSidebar() {
     // usage, neither of which is configuration. Staff-only, since /api/v1
     // is staff-only.
     if (isStaff) {
+        const apiItems = [
+            { title: t('Dashboard'), url: '/api', icon: Activity },
+            { title: t('Documentation'), url: '/api/docs', icon: BookOpen },
+            { title: t('Tokens'), url: '/settings/api-tokens', icon: KeyRound },
+        ];
+
+        // Issuer-only: the route is gated on create_api_tokens, so a
+        // non-issuer would only ever see this entry 403.
+        if (can('create_api_tokens')) {
+            apiItems.push({ title: t('Customer tokens'), url: '/settings/customer-tokens', icon: KeyRound });
+        }
+
         groups.push({
             title: t('API'),
-            items: [
-                { title: t('Dashboard'), url: '/api', icon: Activity },
-                { title: t('Documentation'), url: '/api/docs', icon: BookOpen },
-                { title: t('Tokens'), url: '/settings/api-tokens', icon: KeyRound },
-            ],
+            items: apiItems,
         });
     }
 
