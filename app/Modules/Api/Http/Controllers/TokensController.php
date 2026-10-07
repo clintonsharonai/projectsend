@@ -8,6 +8,8 @@ use App\Http\Controllers\Controller;
 use App\Modules\Api\Auth\TokenAbilities;
 use App\Modules\Audit\Action;
 use App\Modules\Audit\ActivityLogger;
+use App\Modules\Files\Access\StaffLibraryScope;
+use App\Modules\Files\Models\Folder;
 use App\Modules\Identity\Permissions\Permission;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -39,6 +41,7 @@ class TokensController extends Controller
     public function __construct(
         private readonly TokenAbilities $abilities,
         private readonly ActivityLogger $activity,
+        private readonly StaffLibraryScope $scope,
     ) {}
 
     /**
@@ -48,6 +51,12 @@ class TokensController extends Controller
      * stored — the database holds a SHA-256 hash, as on the web screen. The
      * minted token may carry any ability the caller holds, except
      * `create_api_tokens` itself.
+     *
+     * Pass `folder_id` to bind the token to a single folder: the upload path
+     * then forces every file it stores into that folder, ignoring any
+     * `folder_id` the caller sends at upload time. This is the programmatic
+     * twin of the customer-tokens screen — pair it with the `upload_only`
+     * ability for a token that can only push files into one folder.
      */
     public function store(Request $request): JsonResponse
     {
@@ -70,12 +79,27 @@ class TokensController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'abilities' => ['required', 'array', 'min:1'],
             'abilities.*' => ['string', Rule::in($grantable)],
+            // Optional folder binding: a token with a folder_id is a customer
+            // upload token — the API forces every upload it makes into that
+            // folder. Omit it for an ordinary (unbound) token.
+            'folder_id' => ['nullable', 'integer', Rule::exists('folders', 'id')],
             'never_expires' => ['boolean'],
             'expires_in_days' => [
                 Rule::requiredIf(fn (): bool => ! $request->boolean('never_expires')),
                 'nullable', 'integer', 'min:1', 'max:'.$maxDays,
             ],
         ]);
+
+        // The folder must be one this issuer may actually put content into —
+        // the same rule the GUI and the upload path enforce — so a token can
+        // never be bound to a folder its owner cannot write to.
+        $folderId = null;
+
+        if (isset($validated['folder_id'])) {
+            $folder = $this->scope->folders($user)->whereKey($validated['folder_id'])->first();
+            abort_unless($folder instanceof Folder && Folder::uploadableBy($user, $folder), 422);
+            $folderId = $folder->id;
+        }
 
         $expiresAt = $request->boolean('never_expires')
             ? null
@@ -87,14 +111,20 @@ class TokensController extends Controller
             $expiresAt,
         );
 
+        /** @var PersonalAccessToken $accessToken */
+        $accessToken = $token->accessToken;
+
+        if ($folderId !== null) {
+            $accessToken->folder_id = $folderId;
+            $accessToken->save();
+        }
+
         $this->activity->log(Action::ApiTokenCreated, $user, context: [
             'token_name' => $validated['name'],
             'abilities' => $validated['abilities'],
+            'folder_id' => $folderId,
             'expires_at' => $expiresAt?->toIso8601String(),
         ]);
-
-        /** @var PersonalAccessToken $accessToken */
-        $accessToken = $token->accessToken;
 
         return response()->json([
             'data' => [
@@ -102,6 +132,7 @@ class TokensController extends Controller
                 'name' => $accessToken->name,
                 'plain_text' => $token->plainTextToken,
                 'abilities' => $accessToken->abilities ?? [],
+                'folder_id' => $folderId,
                 'expires_at' => $accessToken->expires_at?->toIso8601String(),
                 'created_at' => $accessToken->created_at?->toIso8601String(),
             ],
