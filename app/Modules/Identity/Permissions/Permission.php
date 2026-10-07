@@ -17,6 +17,13 @@ enum Permission: string
 {
     // Files
     case Upload = 'upload';
+    // A token that can only push files into its bound folder (customer
+    // upload tokens). Deliberately a separate key from Upload: the read
+    // routes (list/show/download/comments) accept `upload`, so a token
+    // carrying `upload` could read the library. `upload_only` is accepted by
+    // the upload routes alone, which is what makes a customer token
+    // upload-only rather than a full library credential.
+    case UploadOnly = 'upload_only';
     case CreateOwnFolders = 'create_own_folders';
     case EditFiles = 'edit_files';
     case EditOthersFiles = 'edit_others_files';
@@ -77,6 +84,7 @@ enum Permission: string
     case ViewSystemInfo = 'view_system_info';
     case ViewDashboardCounters = 'view_dashboard_counters';
     case ManageUpdates = 'manage_updates';
+    case CreateApiTokens = 'create_api_tokens';
 
     // Custom assets
     case CreateAssets = 'create_assets';
@@ -90,6 +98,7 @@ enum Permission: string
     {
         return match ($this) {
             self::Upload => 'Upload files',
+            self::UploadOnly => 'Upload files (dedicated token)',
             self::CreateOwnFolders => 'Create own folders',
             self::EditFiles => 'Edit own files',
             self::EditOthersFiles => "Edit others' files",
@@ -136,6 +145,7 @@ enum Permission: string
             self::ViewSystemInfo => 'View system information',
             self::ViewDashboardCounters => 'View dashboard counters',
             self::ManageUpdates => 'Manage updates',
+            self::CreateApiTokens => 'Create API tokens',
             self::CreateAssets => 'Create custom assets',
             self::EditAssets => 'Edit custom assets',
             self::DeleteAssets => 'Delete custom assets',
@@ -182,6 +192,7 @@ enum Permission: string
     {
         return match ($this) {
             self::Upload,
+            self::UploadOnly,
             self::CreateOwnFolders,
             self::EditFiles,
             self::EditOthersFiles,
@@ -229,7 +240,8 @@ enum Permission: string
             self::ViewNews,
             self::ViewSystemInfo,
             self::ViewDashboardCounters,
-            self::ManageUpdates => PermissionCategory::System,
+            self::ManageUpdates,
+            self::CreateApiTokens => PermissionCategory::System,
 
             self::CreateAssets,
             self::EditAssets,

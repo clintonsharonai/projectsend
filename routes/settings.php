@@ -10,6 +10,7 @@ use App\Modules\Files\Http\Controllers\UploadSettingsController;
 use App\Modules\Files\Http\Controllers\VirusScanningSettingsController;
 use App\Modules\Identity\Http\Controllers\ApiTokensController;
 use App\Modules\Identity\Http\Controllers\ConnectedAccountsController;
+use App\Modules\Identity\Http\Controllers\CustomerTokensController;
 use App\Modules\Identity\Http\Controllers\LdapSettingsController;
 use App\Modules\Identity\Http\Controllers\SecuritySettingsController;
 use App\Modules\Identity\Http\Controllers\SocialLoginController;
@@ -138,6 +139,25 @@ Route::middleware('auth')->group(function () {
             // re-proves the password exactly as minting does.
             Route::patch('settings/api-tokens/{token}', [ApiTokensController::class, 'update'])->name('api-tokens.update');
             Route::delete('settings/api-tokens/{token}', [ApiTokensController::class, 'destroy'])->name('api-tokens.destroy');
+        });
+    });
+
+    // Customer tokens — the issuer's view of the tokens they mint for
+    // customers (the web twin of POST /api/v1/tokens). Gated on
+    // create_api_tokens rather than bare `staff`: the screen is only
+    // meaningful to an account that may actually mint, and the gate is the
+    // same key the API endpoint and the no-chaining ceiling turn on, so the
+    // three surfaces agree on who an issuer is. Minting and revoking
+    // re-prove the password for the same reason the API-tokens block does.
+    Route::middleware(['staff', 'can:create_api_tokens'])->group(function () {
+        // `create` before `{token}`, or the literal segment is swallowed by
+        // the id parameter — the same ordering rule as the block above.
+        Route::get('settings/customer-tokens/create', [CustomerTokensController::class, 'create'])->name('customer-tokens.create');
+        Route::get('settings/customer-tokens', [CustomerTokensController::class, 'index'])->name('customer-tokens.index');
+
+        Route::middleware('password.confirm')->group(function () {
+            Route::post('settings/customer-tokens', [CustomerTokensController::class, 'store'])->name('customer-tokens.store');
+            Route::delete('settings/customer-tokens/{token}', [CustomerTokensController::class, 'destroy'])->name('customer-tokens.destroy');
         });
     });
 

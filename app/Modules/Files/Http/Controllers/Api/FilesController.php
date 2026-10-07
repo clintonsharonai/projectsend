@@ -269,11 +269,23 @@ class FilesController extends Controller
             ]);
         }
 
-        $folder = isset($validated['folder_id'])
-            ? Folder::query()->whereKey($validated['folder_id'])->first()
-            : null;
+        // A folder-bound token (a customer upload token) writes only into its
+        // bound folder: the request's folder_id is ignored and the bound one
+        // is forced, so the customer cannot steer the upload elsewhere. If the
+        // bound folder no longer exists the upload fails closed, not to root.
+        $boundFolderId = $user->currentAccessToken()?->folder_id;
 
-        abort_unless(Folder::uploadableBy($user, $folder), 403);
+        if ($boundFolderId !== null) {
+            $folder = Folder::query()->whereKey($boundFolderId)->first();
+            abort_unless($folder instanceof Folder && Folder::uploadableBy($user, $folder), 403);
+            $validated['folder_id'] = $folder->id;
+        } else {
+            $folder = isset($validated['folder_id'])
+                ? Folder::query()->whereKey($validated['folder_id'])->first()
+                : null;
+
+            abort_unless(Folder::uploadableBy($user, $folder), 403);
+        }
 
         // Inert for a staff token — the quota is a client-portal concept —
         // but the check belongs here rather than being added later when

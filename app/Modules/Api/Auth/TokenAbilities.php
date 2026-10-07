@@ -81,6 +81,44 @@ class TokenAbilities
     }
 
     /**
+     * The no-chaining ceiling: the abilities a user may attach to a token
+     * they *mint*, which is availableFor() minus create_api_tokens. A minted
+     * token must never be a way to mint further tokens — the chain stops at
+     * the issuer. Issuer tokens (the ones that do carry create_api_tokens)
+     * are provisioned out-of-band, never through a self-service form, so
+     * removing the key here cannot lock an issuer out of their own power.
+     *
+     * Every minting path — the web customer-tokens screen, the personal
+     * API-tokens screen and the POST /api/v1/tokens endpoint — validates
+     * against this, so no self-service surface can issue a chaining token.
+     *
+     * @return list<string>
+     */
+    public function grantableFor(User $user): array
+    {
+        return array_values(array_diff(
+            $this->availableFor($user),
+            [Permission::CreateApiTokens->value],
+        ));
+    }
+
+    /**
+     * The no-chaining ceiling as Permission cases, for a form that needs
+     * labels and categories rather than bare keys.
+     *
+     * @return list<Permission>
+     */
+    public function grantableCasesFor(User $user): array
+    {
+        $grantable = $this->grantableFor($user);
+
+        return array_values(array_filter(
+            Permission::cases(),
+            fn (Permission $permission): bool => in_array($permission->value, $grantable, true),
+        ));
+    }
+
+    /**
      * Whether the ability is usable in this edition at all, ignoring who is
      * asking. An unknown key is not available — a token may only ever carry
      * abilities drawn from the Permission vocabulary.

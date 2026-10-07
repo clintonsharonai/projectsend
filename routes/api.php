@@ -6,6 +6,7 @@ use App\Modules\Api\Events\ApiModule;
 use App\Modules\Api\Events\RegisteringApiModules;
 use App\Modules\Api\Http\Controllers\CurrentTokenController;
 use App\Modules\Api\Http\Controllers\MeController;
+use App\Modules\Api\Http\Controllers\TokensController;
 use App\Modules\Audit\Http\Controllers\Api\ActivityController;
 use App\Modules\Api\Http\Controllers\OpenApiController;
 use App\Modules\Clients\Http\Controllers\Api\ClientsController;
@@ -66,6 +67,14 @@ Route::middleware(['auth:sanctum', 'api-active', 'staff-token'])->group(function
     // lock the real owner out of their own integrations.
     Route::delete('tokens/current', CurrentTokenController::class)->name('api.tokens.current.destroy');
 
+    // Mint a new token for the calling user. Gated by create_api_tokens so
+    // only a credential explicitly granted that ability can mint; a minted
+    // token can never carry create_api_tokens itself (see TokensController),
+    // so the chain stops at the issuer.
+    Route::post('tokens', [TokensController::class, 'store'])
+        ->middleware('token-can:create_api_tokens')
+        ->name('api.tokens.store');
+
     /*
     |----------------------------------------------------------------------
     | Files (read)
@@ -103,8 +112,12 @@ Route::middleware(['auth:sanctum', 'api-active', 'staff-token'])->group(function
     | so both keys appear here and the policy decides which one applies.
     |
     */
+    // `upload_only` is the customer upload token's key: it reaches this
+    // endpoint (and the chunked twin below) but none of the read routes, so
+    // a folder-bound token can push files in without being able to read the
+    // library. `upload` stays for ordinary tokens.
     Route::post('files', [FilesController::class, 'store'])
-        ->middleware(['token-can:upload', 'throttle:api-uploads'])
+        ->middleware(['token-can:upload,upload_only', 'throttle:api-uploads'])
         ->name('api.files.store');
 
     Route::patch('files/{file}', [FilesController::class, 'update'])
@@ -132,7 +145,7 @@ Route::middleware(['auth:sanctum', 'api-active', 'staff-token'])->group(function
     | CSRF to exempt it from.
     |
     */
-    Route::middleware(['token-can:upload', 'throttle:api-uploads'])->group(function () {
+    Route::middleware(['token-can:upload,upload_only', 'throttle:api-uploads'])->group(function () {
         Route::post('uploads', [ChunkedUploadsController::class, 'store'])->name('api.uploads.store');
         Route::get('uploads/{session}/parts/{part}/sign', [ChunkedUploadsController::class, 'signPart'])
             ->name('api.uploads.parts.sign');
