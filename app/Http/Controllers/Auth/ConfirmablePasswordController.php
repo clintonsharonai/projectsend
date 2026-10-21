@@ -3,9 +3,11 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Modules\Identity\AuthSource;
 use App\Modules\Identity\PasswordVerification;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response as HttpResponse;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -15,9 +17,25 @@ class ConfirmablePasswordController extends Controller
     /**
      * Show the confirm password page.
      */
-    public function show(): Response
+    public function show(Request $request): Response
     {
-        return Inertia::render('auth/confirm-password');
+        $user = $request->user();
+        assert($user !== null);
+
+        return Inertia::render('auth/confirm-password', [
+            // An account provisioned by a provider has no password to
+            // confirm with — its stored hash is a generated string nobody
+            // has seen. The screen offers to set one instead of asking for
+            // it, which is the only way past this for those accounts, and
+            // this screen stands in front of two-factor enrolment.
+            //
+            // Social, not "anything but Local": a directory account has a
+            // password -- the directory's -- and store() accepts it. Asking
+            // whether the account was Local told those accounts to set one
+            // here instead, which /settings/password refuses them, and left
+            // them no way past this screen at all.
+            'has_password' => $user->auth_source !== AuthSource::Social,
+        ]);
     }
 
     /**
@@ -30,8 +48,12 @@ class ConfirmablePasswordController extends Controller
      * their local hash is a Str::password(64) nobody has ever seen -- and
      * this screen stands in front of enrolling in two-factor, so those
      * accounts could not enrol at all.
+     *
+     * Asked for JSON, it answers with a bare 204: that is the password
+     * dialog (RequirePasswordConfirmation), which stays on the page and
+     * sends the refused request again itself, so there is nowhere to go.
      */
-    public function store(Request $request, PasswordVerification $passwords): RedirectResponse
+    public function store(Request $request, PasswordVerification $passwords): RedirectResponse|HttpResponse
     {
         $user = $request->user();
         assert($user !== null);
@@ -43,6 +65,10 @@ class ConfirmablePasswordController extends Controller
         }
 
         $request->session()->put('auth.password_confirmed_at', time());
+
+        if ($request->expectsJson()) {
+            return response()->noContent();
+        }
 
         return redirect()->intended(route('dashboard', absolute: false));
     }

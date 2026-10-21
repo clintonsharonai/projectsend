@@ -38,13 +38,22 @@ class ShareLinksController extends Controller
     {
         Gate::authorize('update', $file);
 
+        $user = $request->user();
+        assert($user !== null);
+
+        // Making a link is publishing, so it asks the publishing key. Staff
+        // are not asked for it, as they never have been: `update` on the
+        // file is their boundary and this would be a new refusal on every
+        // installation that upgraded.
+        abort_unless($user->isStaff() || $user->can('upload_public'), 403);
+
         $validated = $request->validate([
             // Deliberately not `after:now`: that rule reads the bare
             // YYYY-MM-DD the picker posts as midnight UTC, so a creator
             // far enough east would be told today's date is in the past
             // while it is plainly still today where they are. The check
             // moves below, onto the instant the date actually resolves to.
-            'expires_at' => ['nullable', 'date'],
+            'expires_at' => ['nullable', 'string', 'date'],
             'max_downloads' => ['nullable', 'integer', 'min:1'],
             // A custom token is optional — leave blank for a random one,
             // same as before. Must not collide with the file's own
@@ -89,7 +98,18 @@ class ShareLinksController extends Controller
             file: $file,
             creator: $user,
             expiresAt: $user->can('set_file_expiration_date') ? $expiresAt : null,
-            maxDownloads: $user->can('limit_downloads') ? $validated['max_downloads'] ?? null : null,
+            // Cast, and null kept as null rather than falling through a
+            // bare (int) that would turn "no cap" into a cap of zero. The
+            // `integer` rule validates a numeric string without converting
+            // it, and this file is strict_types, so an uncast "5" is a
+            // TypeError against `?int $maxDownloads`. Nothing sends one
+            // today only because files/edit.tsx calls Number() first --
+            // which is a fact about a frontend file, not a guarantee this
+            // signature has. It cost a 500 on the client form, where the
+            // same field was typed as a string.
+            maxDownloads: $user->can('limit_downloads') && ($validated['max_downloads'] ?? null) !== null
+                ? (int) $validated['max_downloads']
+                : null,
             token: $validated['token'] ?? null,
         );
 
@@ -101,6 +121,9 @@ class ShareLinksController extends Controller
         $file = $shareLink->shareable;
         abort_unless($file instanceof File, 404);
 
+        // Deliberately without the publishing key that store() asks for:
+        // revoking takes access away. Somebody whose permission to publish
+        // was withdrawn must still be able to undo what they published.
         Gate::authorize('update', $file);
 
         $shareLink->delete();

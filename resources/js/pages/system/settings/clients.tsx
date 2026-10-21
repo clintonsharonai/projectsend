@@ -5,6 +5,7 @@ import { FormEventHandler } from 'react';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import { SaveButton } from '@/components/save-button';
+import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -18,8 +19,11 @@ interface ClientSettingsProps {
     clients_auto_group: number;
     clients_can_select_group: string;
     clients_membership_deny_cooldown_days: number;
+    client_invitation_expiry_hours: number;
     default_client_storage_quota_mb: number;
     clients_can_preview_files: boolean;
+    clients_home_folders: boolean;
+    clients_without_home: number;
     groups: { id: number; name: string }[];
 }
 
@@ -29,8 +33,11 @@ export default function ClientSettings({
     clients_auto_group,
     clients_can_select_group,
     clients_membership_deny_cooldown_days,
+    client_invitation_expiry_hours,
     default_client_storage_quota_mb,
     clients_can_preview_files,
+    clients_home_folders,
+    clients_without_home,
     groups,
 }: ClientSettingsProps) {
     const { t } = useTranslation();
@@ -46,9 +53,16 @@ export default function ClientSettings({
         clients_auto_group: String(clients_auto_group),
         clients_can_select_group: clients_can_select_group,
         clients_membership_deny_cooldown_days: String(clients_membership_deny_cooldown_days),
+        client_invitation_expiry_hours: String(client_invitation_expiry_hours),
         default_client_storage_quota_mb: String(default_client_storage_quota_mb),
         clients_can_preview_files: clients_can_preview_files,
+        clients_home_folders: clients_home_folders,
     });
+
+    // Its own request, and its own spinner. Saving the form records the
+    // preference; this writes a folder per client, so the two must not look
+    // like one action.
+    const backfill = useForm({});
 
     const submit: FormEventHandler = (e) => {
         e.preventDefault();
@@ -158,6 +172,23 @@ export default function ClientSettings({
                     </div>
 
                     <div className="grid gap-2">
+                        <Label htmlFor="client_invitation_expiry_hours">{t('Invitation links expire after (hours)')}</Label>
+                        <Input
+                            id="client_invitation_expiry_hours"
+                            type="number"
+                            min={1}
+                            max={720}
+                            className="w-32"
+                            value={data.client_invitation_expiry_hours}
+                            onChange={(e) => setData('client_invitation_expiry_hours', e.target.value)}
+                        />
+                        <p className="text-muted-foreground text-sm">
+                            {t('How long a staff-sent invitation stays valid before the invited address has to ask for a new one.')}
+                        </p>
+                        <InputError message={errors.client_invitation_expiry_hours} />
+                    </div>
+
+                    <div className="grid gap-2">
                         <Label htmlFor="default_client_storage_quota_mb">{t('Default storage quota (MB)')}</Label>
                         <Input
                             id="default_client_storage_quota_mb"
@@ -193,6 +224,54 @@ export default function ClientSettings({
                         </div>
                     </div>
                     <InputError message={errors.clients_can_preview_files} />
+
+                    <div className="flex items-start gap-2">
+                        <Checkbox
+                            id="clients_home_folders"
+                            checked={data.clients_home_folders}
+                            onCheckedChange={(checked) => setData('clients_home_folders', checked === true)}
+                        />
+                        <div className="grid gap-1">
+                            <Label htmlFor="clients_home_folders" className="font-normal">
+                                {t('Give each client a folder of their own')}
+                            </Label>
+                            <p className="text-muted-foreground text-sm">
+                                {t(
+                                    'New clients get a folder named after them, and it acts as their root: what they upload and any folder they create goes inside it. In the file library you see one folder per client instead of everything at the top level. Clients still see anything you share with them, wherever it lives.',
+                                )}
+                            </p>
+                        </div>
+                    </div>
+                    <InputError message={errors.clients_home_folders} />
+
+                    {clients_home_folders && (
+                        <div className="border-border bg-muted/30 rounded-lg border p-4">
+                            <p className="text-sm font-medium">{t('Clients created before you turned this on')}</p>
+                            <p className="text-muted-foreground mt-1 text-sm">
+                                {clients_without_home === 0
+                                    ? t('Every client already has a folder.')
+                                    : t(
+                                          ':count of your existing clients have no folder yet. Creating them does not move any file — each client keeps what they already have, and new uploads go into the new folder.',
+                                          { count: String(clients_without_home) },
+                                      )}
+                            </p>
+                            {clients_without_home > 0 && (
+                                <Button
+                                    type="button"
+                                    variant="secondary"
+                                    className="mt-3"
+                                    disabled={backfill.processing}
+                                    onClick={() =>
+                                        backfill.post(route('system-settings.clients.home-folders'), { preserveScroll: true })
+                                    }
+                                >
+                                    {backfill.processing
+                                        ? t('Creating folders…')
+                                        : t('Create folders for these :count clients', { count: String(clients_without_home) })}
+                                </Button>
+                            )}
+                        </div>
+                    )}
 
                     <SaveButton processing={processing} recentlySuccessful={recentlySuccessful} />
                 </form>

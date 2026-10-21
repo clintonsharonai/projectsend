@@ -16,10 +16,13 @@ use App\Modules\Files\Access\OwnFileDownloads;
 use App\Modules\Files\DownloadLimitScope;
 use App\Modules\Files\Editing\ApplyFileEdits;
 use App\Modules\Files\Editing\FileExpiry;
+use App\Modules\Files\Events\ResolvingUploadNotice;
 use App\Modules\Files\Folders\BreadcrumbBuilder;
+use App\Modules\Files\Folders\ClientHomeFolders;
 use App\Modules\Files\Models\Category;
 use App\Modules\Files\Models\File;
 use App\Modules\Files\Models\Folder;
+use App\Modules\Files\Models\ShareLink;
 use App\Modules\Files\Sharing\ClientShareLinks;
 use App\Modules\Files\Uploads\UploadExtensionPolicy;
 use App\Modules\Files\Versions\FileVersionLinks;
@@ -70,6 +73,7 @@ class MyFilesController extends Controller
         private readonly PublicThemeRegistry $themes,
         private readonly CapabilityRegistry $capabilities,
         private readonly BreadcrumbBuilder $breadcrumbs,
+        private readonly ClientHomeFolders $homeFolders,
         private readonly CommentingRules $commenting,
         private readonly VisibleCommentScope $comments,
         private readonly DownloadAllowance $allowance,
@@ -105,6 +109,17 @@ class MyFilesController extends Controller
         // Every folder the client may see: staff-shared subtrees plus any
         // folder they created themselves, anywhere in that visible tree.
         $visibleIds = array_values(Folder::query()->visibleToClient($client)->pluck('id')->map(fn ($id): int => (int) $id)->all());
+
+        // Where this installation gives clients a folder of their own, it
+        // stands in for the root: the client opens the portal and sees what
+        // is inside it, not a folder named after themselves that they have
+        // to click through. Their own name is not information to them.
+        //
+        // It does not replace what else they can see. Folders staff shared
+        // with them still sit alongside -- the home is where their own
+        // things live, not a boundary around them.
+        $home = $this->homeFolders->for($client);
+        $homeId = $home?->id;
 
         // A search term, a category filter, or an owner filter all switch to
         // a flat, global view across everything the client may see — same
@@ -146,7 +161,24 @@ class MyFilesController extends Controller
             if ($current === null) {
                 $folders = Folder::query()
                     ->whereIn('id', $visibleIds)
-                    ->where(fn ($q) => $q->whereNull('parent_id')->orWhereNotIn('parent_id', $visibleIds))
+                    ->where(function ($q) use ($visibleIds, $homeId): void {
+                        // The home's own children, standing in for the root's.
+                        if ($homeId !== null) {
+                            $q->where('parent_id', $homeId);
+                        }
+
+                        // Plus the top of every other subtree they can see,
+                        // with the home itself removed -- it is the level
+                        // they are looking at, not something inside it.
+                        $q->{$homeId === null ? 'where' : 'orWhere'}(function ($outer) use ($visibleIds, $homeId): void {
+                            $outer->where(fn ($inner) => $inner
+                                ->whereNull('parent_id')->orWhereNotIn('parent_id', $visibleIds));
+
+                            if ($homeId !== null) {
+                                $outer->where('id', '!=', $homeId);
+                            }
+                        });
+                    })
                     ->orderBy('name');
             } else {
                 $folders = Folder::query()
@@ -161,7 +193,12 @@ class MyFilesController extends Controller
             // own listing) show here with no folder context.
             $filesQuery = File::query()->visibleToClient($client);
             if ($current === null) {
-                $filesQuery->where(fn (Builder $q) => $q->whereNull('folder_id')->orWhereNotIn('folder_id', $visibleIds));
+                $filesQuery->where(fn (Builder $q) => $q
+                    ->whereNull('folder_id')
+                    ->orWhereNotIn('folder_id', $visibleIds)
+                    // Files sitting directly in the home belong to this
+                    // level too, for the same reason its subfolders do.
+                    ->when($homeId !== null, fn (Builder $w) => $w->orWhere('folder_id', $homeId)));
             } else {
                 $filesQuery->where('folder_id', $current->id);
             }
@@ -239,7 +276,10 @@ class MyFilesController extends Controller
 
         return Inertia::render("portal/themes/{$this->themeKey()}/my-files", [
             'folder' => $current === null ? null : ['id' => $current->id, 'name' => $current->name],
-            'breadcrumb' => $flat ? [] : $this->breadcrumbs->visible($current, $visibleIds),
+            // Trimmed of the home, which is the root here and so is not a
+            // step in the trail -- a client browsing their own subfolder
+            // should see "Invoices", not "Acme Ltd / Invoices".
+            'breadcrumb' => $flat ? [] : $this->trimHome($this->breadcrumbs->visible($current, $visibleIds), $home),
             'folders' => $folderRows->map(fn (Folder $folder): array => [
                 'id' => $folder->id,
                 'name' => $folder->name,
@@ -260,6 +300,10 @@ class MyFilesController extends Controller
                 'mime_type' => $file->mime_type,
                 'size' => $file->size,
                 'created_at' => $file->created_at?->toIso8601String(),
+                // When it stops being available. Shown on the row rather
+                // than only on the editor, because a file that is about to
+                // go should say so where the client looks for it.
+                'expires_at' => $file->expires_at?->toIso8601String(),
                 'is_mine' => $file->uploaded_by === $client->id,
                 // Decided per row by FilePolicy, exactly as the folder rows
                 // above are: a client's own uploads are theirs to manage
@@ -336,7 +380,13 @@ class MyFilesController extends Controller
             abort_unless(Folder::uploadableBy($client, $folder), 403);
         }
 
+        $notice = new ResolvingUploadNotice($client);
+        event($notice);
+
         return Inertia::render('portal/upload', [
+            // Rules a package wants read before the upload — see
+            // ResolvingUploadNotice. An empty list shows nothing.
+            'notice' => $notice->lines,
             'allowed_extensions' => $this->extensionPolicy->hintFor($client),
             'max_file_size_mb' => (int) $this->settings->get(Setting::MaxFileSizeMb),
             'part_size_mb' => (int) config('projectsend.upload_part_size_mb'),
@@ -396,7 +446,24 @@ class MyFilesController extends Controller
                 'categories' => $file->categories->pluck('id')->all(),
             ],
             'can_delete' => Gate::forUser($client)->allows('delete', $file),
+            // Their own root, where the installation gives them one. The
+            // form offers no "No folder" beside it: there is no such place
+            // for this client, and update() resolves it here anyway.
+            'home_folder_id' => $this->homeFolders->for($client)?->id,
             'can_publish' => $client->can('upload_public'),
+            // The public links on this file, and where to make and revoke
+            // one — the same shape the staff screen uses. A file marked
+            // public used to say "anyone with the link can open it" and
+            // then show no link at all.
+            'share_links' => $file->shareLinks()->orderByDesc('created_at')->get()
+                ->map(fn (ShareLink $link): array => [
+                    'id' => $link->id,
+                    'url' => route('share.show', $link->token),
+                    'expires_at' => $link->expires_at?->toIso8601String(),
+                    'downloads_count' => $link->downloads_count,
+                    'revoke_url' => route('share-links.destroy', $link, false),
+                ])->values()->all(),
+            'share_link_store_url' => route('files.share-links.store', $file, false),
             'can_set_expiration' => $client->can('set_file_expiration_date'),
             'can_set_categories' => $client->can('set_file_categories'),
             'can_limit_downloads' => $client->can('limit_downloads'),
@@ -467,7 +534,7 @@ class MyFilesController extends Controller
             'commentable' => ['sometimes', 'boolean'],
             'categories' => ['array'],
             'categories.*' => ['integer', 'exists:categories,id'],
-            'expires_at' => ['nullable', 'date'],
+            'expires_at' => ['nullable', 'string', 'date'],
             'download_limit' => ['nullable', 'integer', 'min:1'],
             'download_limit_scope' => ['nullable', Rule::enum(DownloadLimitScope::class)],
         ]);
@@ -480,6 +547,15 @@ class MyFilesController extends Controller
         // them.
 
         $folderId = isset($validated['folder_id']) ? (int) $validated['folder_id'] : null;
+
+        // "No folder" means the top of what this client sees, which on an
+        // installation that gives them a home folder is inside it — not the
+        // root of the library, beside the staff folders. Uploading and
+        // creating a folder already resolve it this way; the editor did
+        // not, so a client could move their own file out of their home and
+        // into the administrator's root by choosing "No folder" (reported
+        // by binghuo).
+        $folderId ??= $this->homeFolders->for($client)?->id;
 
         // The client rule, not the staff one: somewhere they could have
         // uploaded it in the first place. Same check the upload path makes,
@@ -577,5 +653,24 @@ class MyFilesController extends Controller
         $value = $this->settings->get(Setting::Theme);
 
         return $this->themes->resolve(is_string($value) ? $value : 'default', $this->capabilities);
+    }
+
+    /**
+     * Drop the home folder from the front of a breadcrumb.
+     *
+     * Only from the front, and only when it is actually there: a folder
+     * shared with the client from elsewhere in the library has a trail of
+     * its own that the home has nothing to do with.
+     *
+     * @param  list<array{id: int, name: string}>  $trail
+     * @return list<array{id: int, name: string}>
+     */
+    private function trimHome(array $trail, ?Folder $home): array
+    {
+        if ($home === null || $trail === [] || $trail[0]['id'] !== $home->id) {
+            return $trail;
+        }
+
+        return array_slice($trail, 1);
     }
 }

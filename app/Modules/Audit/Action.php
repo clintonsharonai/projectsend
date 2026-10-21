@@ -40,6 +40,14 @@ enum Action: string
     case SocialAccountUnlinked = 'social.account_unlinked';
     case ClientApproved = 'client.approved';
     case ClientDenied = 'client.denied';
+    case ClientInvited = 'client.invited';
+    case ClientInvitationRedeemed = 'client.invitation_redeemed';
+    case ClientInvitationRevoked = 'client.invitation_revoked';
+    case ClientInvitationResent = 'client.invitation_resent';
+    // Logged by the hourly sweep, so it has no actor: nobody switched the
+    // account off, its date passed. Distinct from UserDeactivated for the
+    // same reason TwoFactorReset is distinct from TwoFactorDisabled.
+    case ClientExpired = 'client.expired';
     // Files
     case FileUploaded = 'file.uploaded';
     case FileUpdated = 'file.updated';
@@ -67,6 +75,21 @@ enum Action: string
     case FolderMadePrivate = 'folder.made_private';
     case UploadAborted = 'upload.aborted';
     case FileImported = 'file.imported';
+
+    // Virus scanning. A clean result is not logged: it is the ordinary
+    // outcome of every upload, and a row per upload would bury the ones
+    // that matter. Only the three that need answering are.
+    case FileQuarantined = 'file.quarantined';
+    case FileReleased = 'file.released';
+    // Allowed through without being checked — because the scanner could
+    // not be reached, or the file was too large or encrypted and this
+    // installation allows those. The context says which.
+    case FileNotScanned = 'file.not_scanned';
+
+    // The row is here and the bytes are not. Written by the daily check,
+    // so it has no actor: nobody did this, or nobody who was using the
+    // application did.
+    case FileMissing = 'file.missing';
     case OrphanFileDeleted = 'orphan_file.deleted';
     case OrphanFileAutoDeleted = 'orphan_file.auto_deleted';
     case ExpiredFileDeleted = 'file.expired_deleted';
@@ -165,6 +188,11 @@ enum Action: string
             self::ClientSelfRegistered => 'Registered a new client account',
             self::ClientApproved => 'Approved the account request of ":subject"',
             self::ClientDenied => 'Denied the account request of ":name"',
+            self::ClientInvited => 'Invited :email to register a client account',
+            self::ClientInvitationRedeemed => 'Registered a client account from an invitation',
+            self::ClientInvitationRevoked => 'Revoked the invitation sent to :email',
+            self::ClientInvitationResent => 'A new invitation link was requested for :email',
+            self::ClientExpired => 'The client account ":name" expired and was deactivated',
             self::FileUploaded => 'Uploaded the file ":subject"',
             self::FileUpdated => 'Updated the file ":subject"',
             self::FileDeleted => 'Deleted the file ":name"',
@@ -199,6 +227,14 @@ enum Action: string
             self::CommentDeleted => 'Deleted a comment on the file ":subject"',
             self::CommentApproved => 'Approved a comment on the file ":subject"',
             self::FileImported => 'Imported the orphan file ":subject"',
+            // :name rather than :subject, unlike the file actions above
+            // it: these two are written by the scan job, which has no
+            // actor and attaches no subject, so the name has to travel in
+            // the context or the line reads 'The file "" was quarantined'.
+            self::FileQuarantined => 'The file ":name" was quarantined: :threat',
+            self::FileReleased => 'Released the quarantined file ":subject" (:reason)',
+            self::FileNotScanned => 'The file ":name" was not scanned for viruses: :reason',
+            self::FileMissing => 'The file ":name" is no longer on the server',
             self::OrphanFileDeleted => 'Deleted the orphan file ":name"',
             self::OrphanFileAutoDeleted => 'Deleted the orphan file ":name"',
             self::ExpiredFileDeleted => 'Deleted the expired file ":name"',
@@ -267,6 +303,11 @@ enum Action: string
             self::ClientSelfRegistered => 'A client registered an account',
             self::ClientApproved => 'A client account request was approved',
             self::ClientDenied => 'A client account request was denied',
+            self::ClientInvited => 'A client was invited to register an account',
+            self::ClientInvitationRedeemed => 'A client registered an account from an invitation',
+            self::ClientInvitationRevoked => 'An invitation was revoked before it was used',
+            self::ClientInvitationResent => 'An invited person asked for a replacement link',
+            self::ClientExpired => 'A client account reached its expiry date and was deactivated',
             self::FileUploaded => 'A file was uploaded',
             self::FileUpdated => 'A file was updated',
             self::FileDeleted => 'A file was deleted',
@@ -298,6 +339,10 @@ enum Action: string
             self::CommentDeleted => 'A comment was deleted',
             self::CommentApproved => 'A comment was approved',
             self::FileImported => 'An orphan file was imported',
+            self::FileQuarantined => 'A file was quarantined by the virus scanner',
+            self::FileReleased => 'A quarantined file was released by an administrator',
+            self::FileNotScanned => 'A file was allowed through without being scanned',
+            self::FileMissing => 'A file in the library was found to be missing from storage',
             self::OrphanFileDeleted => 'An orphan file was deleted',
             self::OrphanFileAutoDeleted => 'An orphan file was automatically deleted after its retention grace period passed',
             self::ExpiredFileDeleted => 'An expired file was automatically deleted after its retention grace period passed',

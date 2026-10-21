@@ -1,10 +1,10 @@
 import { type SharedData } from '@/types';
-import { usePage } from '@inertiajs/react';
-import { AlertTriangle, ArrowUpCircle, HardDrive } from 'lucide-react';
+import { Link, usePage } from '@inertiajs/react';
+import { AlertTriangle, ArrowUpCircle, HardDrive, ShieldAlert } from 'lucide-react';
 import { useState } from 'react';
 
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { FileDeliveryDialog, type FileDelivery } from '@/components/file-delivery-dialog';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { UpdateInstructions, type InstallKind } from '@/components/update-instructions';
 import { useTranslation } from '@/hooks/use-translation';
 import { formatBytes } from '@/lib/format-bytes';
@@ -23,6 +23,8 @@ export interface SystemInfo {
     database: string;
     storage_used_bytes: number;
     storage_free_bytes: number;
+    storage_driver: string;
+    upload_temp_free_bytes: number;
     update_available: boolean;
     latest_version: string | null;
     release_url: string | null;
@@ -33,6 +35,24 @@ export interface SystemInfo {
     install_kind: InstallKind;
     /** How downloads leave the server — see FileDeliveryDialog. */
     file_delivery: FileDelivery;
+    /**
+     * Only ever present when something is wrong with virus scanning, and
+     * null when scanning is off. A scanner that has stopped answering
+     * looks, from every other screen, exactly like one that is working:
+     * uploads keep arriving and downloads keep working, because that is
+     * the configured behaviour. This is where that gets said out loud.
+     */
+    scanning: {
+        /** False means no scanner is configured at all. */
+        configured: boolean;
+        reachable: boolean;
+        engine: string | null;
+        definitions_age_hours: number | null;
+        let_through_24h: number;
+        pending: number;
+    } | null;
+    /** Files in the library whose bytes are gone. Zero is the ordinary answer. */
+    missing_files: number;
 }
 
 /**
@@ -91,7 +111,9 @@ function StorageDurabilityNotice({ durability }: { durability: StorageDurability
                                   volume: durability.volume,
                               })
                             : t('They survive upgrades, but they live in a Docker-managed volume rather than a directory you chose.')}{' '}
-                        {t('That means docker compose down -v and docker volume prune both delete them, and a backup of your server can miss them entirely.')}
+                        {t(
+                            'That means docker compose down -v and docker volume prune both delete them, and a backup of your server can miss them entirely.',
+                        )}
                     </p>
                 </AlertDescription>
             </Alert>
@@ -99,6 +121,43 @@ function StorageDurabilityNotice({ durability }: { durability: StorageDurability
     }
 
     return null;
+}
+
+/**
+ * What the scanning row says, and whether it is a warning.
+ *
+ * Four states in one line, because the row is always there: no scanner at
+ * all, one that is not answering, one letting files through, and one
+ * quietly working — which is the common case and the only one that is not
+ * a warning.
+ */
+function scanningRow(
+    scanning: NonNullable<SystemInfo['scanning']>,
+    t: (key: string, replacements?: Record<string, string | number>) => string,
+): { value: string; warning: boolean; title: string } {
+    if (!scanning.configured) {
+        return {
+            value: t('Nothing'),
+            warning: true,
+            title: t('Uploads are passed on without being checked for viruses.'),
+        };
+    }
+
+    const engine = scanning.engine ?? t('A virus scanner');
+
+    if (!scanning.reachable) {
+        return { value: t(':engine (not answering)', { engine }), warning: true, title: t('The scanner could not be reached.') };
+    }
+
+    if (scanning.let_through_24h > 0 || scanning.pending > 0) {
+        return {
+            value: engine,
+            warning: true,
+            title: t('Some files were not checked. Open the virus scanning settings for the detail.'),
+        };
+    }
+
+    return { value: engine, warning: false, title: '' };
 }
 
 export function SystemWidget({ system, onViewReleaseNotes }: { system: SystemInfo; onViewReleaseNotes: () => void }) {
@@ -109,12 +168,58 @@ export function SystemWidget({ system, onViewReleaseNotes }: { system: SystemInf
     // Only PHP is worth flagging. The other two are the file being handed
     // to the web server, which is the outcome this is watching for.
     const deliveryNeedsAttention = system.file_delivery.method === 'php';
+    const scanning = system.scanning ? scanningRow(system.scanning, t) : null;
 
     return (
         <div>
             {/* Before the update notice on purpose: losing the files outranks
                 being a version behind. */}
             {durability && <StorageDurabilityNotice durability={durability} />}
+            {/* Only for a scanner that is configured and misbehaving. An
+                installation with no scanner at all says so on its own row
+                below, with the same link — two warnings for one fact would
+                make the card noisier without saying more. */}
+            {system.missing_files > 0 && (
+                <Alert variant="destructive" className="mb-3">
+                    <AlertTriangle className="size-4" />
+                    <AlertTitle>{t(':count files are missing from storage', { count: system.missing_files })}</AlertTitle>
+                    <AlertDescription>
+                        {t('They are listed in the library and cannot be downloaded. Their bytes are not where this installation expects them.')}
+                        <Link href="/files/orphans?tab=missing" className="mt-1 inline-block underline hover:no-underline">
+                            {t('See which files')}
+                        </Link>
+                    </AlertDescription>
+                </Alert>
+            )}
+            {system.scanning?.configured && scanning?.warning && (
+                <Alert variant="warning" className="mb-3">
+                    <ShieldAlert className="size-4" />
+                    <AlertTitle>
+                        {system.scanning.reachable ? t('Files are going out unscanned') : t('The virus scanner is not answering')}
+                    </AlertTitle>
+                    <AlertDescription>
+                        <ul className="list-inside list-disc">
+                            {!system.scanning.reachable && <li>{t('Uploads cannot be checked until it is back.')}</li>}
+                            {system.scanning.let_through_24h > 0 && (
+                                <li>
+                                    {t(':count files were allowed through without being scanned in the last 24 hours.', {
+                                        count: system.scanning.let_through_24h,
+                                    })}
+                                </li>
+                            )}
+                            {system.scanning.pending > 0 && (
+                                <li>{t(':count files have been waiting to be checked for over an hour.', { count: system.scanning.pending })}</li>
+                            )}
+                            {system.scanning.definitions_age_hours !== null && system.scanning.definitions_age_hours >= 72 && (
+                                <li>{t('The virus definitions are :hours hours old.', { hours: system.scanning.definitions_age_hours })}</li>
+                            )}
+                        </ul>
+                        <Link href="/system/settings/virus-scanning" className="mt-1 inline-block underline hover:no-underline">
+                            {t('Virus scanning settings')}
+                        </Link>
+                    </AlertDescription>
+                </Alert>
+            )}
             {system.update_available && (
                 <Alert variant="warning" className="mb-3">
                     <ArrowUpCircle className="size-4" />
@@ -165,12 +270,30 @@ export function SystemWidget({ system, onViewReleaseNotes }: { system: SystemInf
                     <dt className="text-muted-foreground">{t('Storage used')}</dt>
                     <dd>{formatBytes(system.storage_used_bytes)}</dd>
                 </div>
-                {system.storage_free_bytes >= 0 && (
-                    <div className="flex justify-between gap-2">
-                        <dt className="text-muted-foreground">{t('Storage free')}</dt>
-                        <dd>{formatBytes(system.storage_free_bytes)}</dd>
-                    </div>
-                )}
+                <div className="flex justify-between gap-2">
+                    <dt className="text-muted-foreground">{t('File storage')}</dt>
+                    <dd>
+                        {system.storage_driver === 'local'
+                            ? t('Local disk')
+                            : system.storage_driver === 's3'
+                              ? t('S3-compatible storage')
+                              : t('External storage')}
+                    </dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                    <dt className="text-muted-foreground">{t('Storage available')}</dt>
+                    <dd>
+                        {system.storage_driver !== 'local'
+                            ? t('Managed by provider')
+                            : system.storage_free_bytes >= 0
+                              ? formatBytes(system.storage_free_bytes)
+                              : t('Unknown')}
+                    </dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                    <dt className="text-muted-foreground">{t('Temporary upload space')}</dt>
+                    <dd>{system.upload_temp_free_bytes >= 0 ? formatBytes(system.upload_temp_free_bytes) : t('Unknown')}</dd>
+                </div>
                 {/* Stated always, flagged only when it is the slow one.
                     Both halves of the row open the explanation, and the
                     label is underlined, because the icon alone did not read
@@ -214,6 +337,42 @@ export function SystemWidget({ system, onViewReleaseNotes }: { system: SystemInf
                         )}
                     </dd>
                 </div>
+                {/* Same rule as the row above, and the reason this one is
+                    never hidden: an installation checking nothing looks
+                    exactly like one that is. Absent only where the scanner
+                    is not this installation's to connect. */}
+                {scanning && (
+                    <div className="flex justify-between gap-2">
+                        <dt>
+                            {scanning.warning ? (
+                                <Link
+                                    href="/system/settings/virus-scanning"
+                                    className="font-medium text-amber-600 underline underline-offset-2 hover:no-underline dark:text-amber-500"
+                                    title={scanning.title}
+                                >
+                                    {t('Uploads checked by')}
+                                </Link>
+                            ) : (
+                                <span className="text-muted-foreground">{t('Uploads checked by')}</span>
+                            )}
+                        </dt>
+                        <dd>
+                            {scanning.warning ? (
+                                <Link
+                                    href="/system/settings/virus-scanning"
+                                    className="flex items-center gap-1.5 font-medium text-amber-600 hover:underline dark:text-amber-500"
+                                    aria-label={scanning.title}
+                                    title={scanning.title}
+                                >
+                                    {scanning.value}
+                                    <AlertTriangle className="size-4" />
+                                </Link>
+                            ) : (
+                                <span>{scanning.value}</span>
+                            )}
+                        </dd>
+                    </div>
+                )}
                 {/* Stated even when everything is correct: "my files are on a
                     host directory" is worth being able to confirm at a glance,
                     not only worth warning about when it is false. */}
@@ -228,6 +387,10 @@ export function SystemWidget({ system, onViewReleaseNotes }: { system: SystemInf
                     </div>
                 )}
             </dl>
+            <p className="text-muted-foreground text-xs">
+                {t('Uploads use temporary space while being assembled, including when files are stored externally.')}
+            </p>
+
             <FileDeliveryDialog delivery={system.file_delivery} open={deliveryOpen} onOpenChange={setDeliveryOpen} />
         </div>
     );

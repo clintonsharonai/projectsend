@@ -16,11 +16,16 @@ use App\Modules\Files\Access\ShareTargets;
 use App\Modules\Files\Access\StaffLibraryScope;
 use App\Modules\Files\Folders\BreadcrumbBuilder;
 use App\Modules\Files\Folders\FolderService;
+use App\Modules\Files\Folders\UndeletableFiles;
 use App\Modules\Files\Models\Category;
 use App\Modules\Files\Models\File;
+use App\Modules\Files\Scanning\NotScannedReason;
+use App\Modules\Files\Scanning\ScanningConfig;
+use App\Modules\Files\Scanning\ScanStatus;
 use App\Modules\Files\Models\Folder;
 use App\Modules\Files\Versions\FileVersionLinks;
 use App\Modules\Groups\Models\Group;
+use App\Modules\Identity\Models\Role;
 use App\Support\ConcatenatedPagination;
 use App\Support\Pagination;
 use App\Support\PublicUrl;
@@ -61,6 +66,7 @@ class FoldersController extends Controller
         private readonly VisibleCommentScope $comments,
         private readonly FileVersionLinks $versionLinks,
         private readonly DownloadAllowance $allowance,
+        private readonly UndeletableFiles $undeletable,
     ) {}
 
     /**
@@ -84,6 +90,15 @@ class FoldersController extends Controller
             'search' => ['nullable', 'string', 'max:255'],
             'folder' => ['nullable', 'integer'],
             'category' => ['nullable', 'integer', 'exists:categories,id'],
+            'uploader' => ['nullable', 'integer', 'exists:users,id'],
+            'visibility' => ['nullable', 'in:public,private'],
+            'downloads' => ['nullable', 'in:none,any'],
+            'role' => ['nullable', 'integer', 'exists:roles,id'],
+            // "current" is every file nothing has replaced, which includes
+            // a file that was never versioned at all -- it is the current
+            // version of itself. "outdated" is the same word the version
+            // badge uses, so the filter and the row agree.
+            'version' => ['nullable', 'in:current,outdated'],
             // Not a 'boolean' rule: that only accepts true/false/0/1/'0'/'1',
             // rejecting the literal "true"/"" the frontend checkbox sends.
             // $request->boolean() below coerces any of those safely, so
@@ -92,12 +107,25 @@ class FoldersController extends Controller
         $search = trim($validated['search'] ?? '');
         $searching = $search !== '';
         $categoryId = $validated['category'] ?? null;
+        // Cast, because `integer` validates a numeric string without
+        // converting it -- so these arrive as "5" from the query string.
+        // permitsClientId() below takes a strict ?int and 500s on a string,
+        // and the props these become are typed `number | null` on the page.
+        $uploaderId = isset($validated['uploader']) ? (int) $validated['uploader'] : null;
+        $visibility = $validated['visibility'] ?? null;
+        $downloads = $validated['downloads'] ?? null;
+        $roleId = isset($validated['role']) ? (int) $validated['role'] : null;
+        $version = $validated['version'] ?? null;
         $expired = $request->boolean('expired');
 
-        // A search term, a category filter, or the expired-only filter all
-        // switch to a flat view across the whole visible library;
-        // otherwise it's folder browsing.
-        $flat = $searching || $categoryId !== null || $expired;
+        // A search term or any filter switches to a flat view across the
+        // whole visible library; otherwise it's folder browsing. Every
+        // filter here is a property of a *file*, so in flat mode the folder
+        // sequence stays empty unless there is a search term to match names
+        // against -- which is what the existing branch below already does.
+        $flat = $searching || $categoryId !== null || $expired
+            || $uploaderId !== null || $visibility !== null
+            || $downloads !== null || $roleId !== null || $version !== null;
 
         $folderQuery = $this->scope->folders($user)->withCount(['children', 'files']);
         // `downloads` unconditionally — the library has always shown a
@@ -105,7 +133,18 @@ class FoldersController extends Controller
         // something on this install is actually limited.
         $fileQuery = $this->allowance->withOwnCount(
             $this->scope->files($user)->with('uploader.role', 'categories', 'folder')
-                ->withCount(['assignments', 'downloads']),
+                ->withCount(['assignments', 'downloads'])
+                // A file the scanner refused, or one whose bytes are gone,
+                // is not a file anybody can work with: every button on its
+                // row leads somewhere that refuses, and the download leads
+                // to an error page. They are listed on the two screens
+                // that exist to act on them — Quarantine, and Files
+                // missing from storage — and left out here.
+                ->whereNotIn('scan_status', [
+                    ScanStatus::Infected->value,
+                    ScanStatus::UnscannableBlocked->value,
+                    ScanStatus::Missing->value,
+                ]),
             $user,
         );
 
@@ -120,6 +159,29 @@ class FoldersController extends Controller
                 ->when($categoryId !== null, fn (Builder $q) => $q
                     ->whereHas('categories', fn (Builder $c) => $c->where('categories.id', $categoryId)))
                 ->when($expired, fn (Builder $q) => $q->expired())
+                // The same guard /api/v1/files puts on `uploaded_by`, and it
+                // is needed for the same reason. A filter is a question, and
+                // this one asks "did user N put anything into my library".
+                // fileRow() already withholds an uploader's name from a
+                // viewer who may not identify them -- so answering this
+                // plainly would hand back, as a row count, precisely the
+                // identity the row itself is redacting. An id this caller
+                // may not identify matches nothing, which is
+                // indistinguishable from someone who has uploaded nothing.
+                ->when($uploaderId !== null && ! $this->identity->permitsClientId($user, $uploaderId),
+                    fn (Builder $q) => $q->whereRaw('1 = 0'))
+                ->when($uploaderId !== null, fn (Builder $q) => $q->where('uploaded_by', $uploaderId))
+                ->when($roleId !== null, fn (Builder $q) => $q
+                    ->whereHas('uploader', fn (Builder $u) => $u->where('role_id', $roleId)))
+                // has/doesn't-have rather than a comparison on the
+                // withCount alias: an aggregate cannot be filtered in a
+                // WHERE, and `downloads_count = 0` in a HAVING would be
+                // applied after the pagination slice above.
+                ->when($downloads === 'none', fn (Builder $q) => $q->whereDoesntHave('downloads'))
+                ->when($downloads === 'any', fn (Builder $q) => $q->whereHas('downloads'))
+                ->when($version === 'current', fn (Builder $q) => $q->whereDoesntHave('nextVersion'))
+                ->when($version === 'outdated', fn (Builder $q) => $q->whereHas('nextVersion'))
+                ->when($visibility !== null, fn (Builder $q) => $q->effectivelyPublic($visibility === 'public'))
                 ->orderBy('name');
         } else {
             $current = $request->integer('folder') > 0
@@ -162,6 +224,11 @@ class FoldersController extends Controller
                 'search' => $search !== '' ? $search : null,
                 'folder' => $current?->id,
                 'category' => $categoryId,
+                'uploader' => $uploaderId,
+                'visibility' => $visibility,
+                'downloads' => $downloads,
+                'role' => $roleId,
+                'version' => $version,
                 'expired' => $expired ? 'true' : null,
                 'page' => Pagination::redirectPage($sliced['paginator']),
             ]));
@@ -176,15 +243,29 @@ class FoldersController extends Controller
         // as the comment counts above.
         $versions = $this->versionLinks->forMany($fileRows, $user, fn (File $other): string => route('files.edit', $other, false));
 
+        // Two queries for the whole page, not one per row. `distinct` on an
+        // indexed foreign key rather than a join, because all this needs is
+        // the set of ids -- the names come back with the roles in one go.
+        $uploaders = User::query()
+            ->whereIn('id', $this->scope->files($user)->whereNotNull('uploaded_by')->distinct()->pluck('uploaded_by'))
+            ->with('role')
+            ->orderBy('name')
+            ->get(['id', 'name', 'role_id']);
+
         return Inertia::render('files/index', [
             'folder' => $current === null ? null : ['id' => $current->id, 'name' => $current->name],
-            'breadcrumb' => $flat ? [] : $this->breadcrumbs->for($current),
+            'breadcrumb' => $flat ? [] : $this->breadcrumb($user, $current),
             'folders' => $folderRows->map(fn (Folder $folder): array => $this->folderRow($user, $folder))->all(),
             'files' => $fileRows->map(fn (File $file): array => $this->fileRow($user, $file, $commentCounts, $pendingCounts, $versions))->all(),
             'pagination' => Pagination::meta($sliced['paginator']),
             'search' => $search,
             'searching' => $flat,
             'category' => $categoryId,
+            'uploader' => $uploaderId,
+            'visibility' => $visibility,
+            'downloads' => $downloads,
+            'role' => $roleId,
+            'version' => $version,
             'expired' => $expired,
             'categories' => Category::query()->orderBy('name')->get(['id', 'name', 'color'])
                 ->map(fn (Category $category): array => ['id' => $category->id, 'name' => $category->name, 'color' => $category->color])->all(),
@@ -194,11 +275,56 @@ class FoldersController extends Controller
             // every folder name and id on the installation.
             'folder_options' => $this->scope->folders($user)->orderBy('path')->orderBy('name')->get()
                 ->map(fn (Folder $folder): array => ['id' => $folder->id, 'name' => $folder->name])->all(),
+            // Only people who actually uploaded something *this viewer can
+            // see*, and their roles taken from the same set. Narrowed for
+            // the reason folder_options directly above is: an unscoped list
+            // would hand a client-scoped staffer the name and id of every
+            // account on the installation, through a filter dropdown.
+            // Through filterClientPairs, so the dropdown never offers a name
+            // this viewer may not be told -- the same rule fileRow() applies
+            // to the uploader on each row, asked once for the whole list.
+            'uploader_options' => $this->identity->filterClientPairs($user, array_values($uploaders
+                ->map(fn (User $uploader): array => ['id' => $uploader->id, 'name' => $uploader->name])->all())),
+            'role_options' => $uploaders->pluck('role')->filter()->unique('id')->sortBy('name')->values()
+                ->map(fn (Role $role): array => ['id' => $role->id, 'name' => $role->name])->all(),
             'can_create_folders' => $user->can('create_own_folders'),
             'can_upload' => $user->can('upload'),
             'can_manage_public' => $user->can('upload_public'),
             'comments_enabled' => $this->commenting->enabled(),
         ]);
+    }
+
+    /**
+     * What the scanner made of a file, for a staff member's list.
+     *
+     * Staff see every file they always saw, with its state on it —
+     * withholding applies to recipients, not to the library. Null while
+     * scanning is off so nothing is decorated on an installation that does
+     * not use it.
+     *
+     * @return array{status: string, note: string|null}|null
+     */
+    private function scanState(File $file): ?array
+    {
+        if (! app(ScanningConfig::class)->enabled() && $file->scan_status === ScanStatus::NotScanned) {
+            return null;
+        }
+
+        // A file from before the scanner existed carries no reason — see
+        // File::scopeNeverScanned — and "Not scanned" with no explanation
+        // is the one badge somebody would have to come and ask about.
+        $note = $file->scan_note ?? ($file->scan_status === ScanStatus::NotScanned
+            ? NotScannedReason::BeforeScanning->value
+            : null);
+
+        return [
+            'status' => $file->scan_status->value,
+            // A reason is a key and is translated here; a threat name is
+            // the scanner's own words and is passed through.
+            'note' => $note === null ? null : (NotScannedReason::tryFrom($note)?->label() !== null
+                ? (string) __(NotScannedReason::from($note)->label())
+                : $note),
+        ];
     }
 
     /**
@@ -253,6 +379,9 @@ class FoldersController extends Controller
             ] : null,
             'public' => $file->isEffectivelyPublic(),
             'expired' => $file->isExpired(),
+            // Null while scanning is off, so a library that does not use
+            // it carries no badge.
+            'scan' => $this->scanState($file),
             // No link at all once expired — the public route 404s past
             // expiry too (see File::scopeNotExpired's callers), so there's
             // no point offering a button that leads to a dead page.
@@ -299,7 +428,7 @@ class FoldersController extends Controller
             'public_url' => $folder->public
                 ? $this->publicUrl->for($folder)
                 : null,
-            'breadcrumb' => $this->breadcrumbs->for($folder),
+            'breadcrumb' => $this->breadcrumb($user, $folder),
             'can_update' => Gate::forUser($user)->allows('update', $folder),
             'can_manage_public' => $user->can('upload_public'),
             ...$this->shareTargets->forSubject($folder, $user),
@@ -322,6 +451,11 @@ class FoldersController extends Controller
         ]);
 
         $parent = $this->resolveParent($user, $validated['parent_id'] ?? null);
+
+        // A folder inside a public one is public, so creating it there is
+        // placing content into a public folder: the question every other
+        // write of a parent_id already asks (Folder::uploadableBy).
+        abort_unless(Folder::uploadableBy($user, $parent), 403);
 
         $folder = $this->folders->create($validated['name'], $parent);
 
@@ -431,16 +565,9 @@ class FoldersController extends Controller
         $viewer = $request->user();
         assert($viewer !== null);
 
-        // Deleting a folder cascades to every file in its subtree, and a
-        // File's `deleted` hook removes the bytes from disk — there is no
-        // restore. Authorizing the folder is not authorizing its contents:
-        // FilePolicy::delete asks for `delete_others_files` on somebody
-        // else's upload, and for the library boundary on top of that, and
-        // neither question is asked anywhere on this path.
-        //
-        // MyFoldersController::destroy already refuses for the client half
-        // of the same cascade, in the same words. This is the staff half.
-        $blocked = $this->undeletableFileCount($viewer, $folder);
+        // Authorizing the folder is not authorizing the files the cascade
+        // takes with it — see UndeletableFiles, which the API asks too.
+        $blocked = $this->undeletable->count($viewer, $folder);
 
         if ($blocked > 0) {
             return back()->with('error', trans_choice(
@@ -461,47 +588,28 @@ class FoldersController extends Controller
     }
 
     /**
-     * How many files in this folder's subtree the viewer may not delete.
+     * The trail to $folder, trimmed for a client-scoped staff member to
+     * start at the first folder their library shows them: one of their
+     * clients' folders can sit inside somebody else's tree, and the names
+     * above it are not theirs to read. The client portal trims the same way.
      *
-     * Asked as one count rather than FilePolicy::delete per file: a folder
-     * can hold thousands, Gate resolves a fresh policy for every check, and
-     * a per-row policy check on a listing is the cost 0a8b609e went to
-     * some trouble to remove. The two halves of FilePolicy::delete are
-     * expressible in SQL — the permission half is constant for this
-     * viewer, and the library half is the query StaffLibraryScope already
-     * memoises per request.
-     *
-     * Somebody holding both delete permissions and no library scope can
-     * delete anything in the subtree by construction, so they never pay for
-     * the query at all.
+     * @return list<array{id: int, name: string}>
      */
-    private function undeletableFileCount(User $viewer, Folder $folder): int
+    private function breadcrumb(User $user, ?Folder $folder): array
     {
-        $mayDeleteOwn = $viewer->can('delete_files');
-        $mayDeleteOthers = $viewer->can('delete_others_files');
-        $scoped = $viewer->isClientScoped();
-
-        if ($mayDeleteOwn && $mayDeleteOthers && ! $scoped) {
-            return 0;
+        if ($folder === null || ! $user->isClientScoped()) {
+            return $this->breadcrumbs->for($folder);
         }
 
-        return File::query()
-            ->whereIn('folder_id', $folder->subtreeFolderIds())
-            ->where(function (Builder $outer) use ($viewer, $mayDeleteOwn, $mayDeleteOthers, $scoped): void {
-                if (! $mayDeleteOwn) {
-                    $outer->orWhere('uploaded_by', $viewer->id);
-                }
+        $visibleIds = array_values(array_map(
+            'intval',
+            $this->scope->folders($user)
+                ->whereIn('folders.id', [...$folder->ancestorIds(), $folder->id])
+                ->pluck('folders.id')
+                ->all(),
+        ));
 
-                if (! $mayDeleteOthers) {
-                    $outer->orWhere(fn (Builder $others): Builder => $others
-                        ->whereNull('uploaded_by')->orWhere('uploaded_by', '!=', $viewer->id));
-                }
-
-                if ($scoped) {
-                    $outer->orWhereNotIn('id', $this->scope->files($viewer)->select('id'));
-                }
-            })
-            ->count();
+        return $this->breadcrumbs->visible($folder, $visibleIds);
     }
 
     private function resolveParent(?User $user, ?int $parentId): ?Folder

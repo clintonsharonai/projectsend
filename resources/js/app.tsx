@@ -1,10 +1,17 @@
 import '../css/app.css';
 
+// Stylesheets an installed package ships under resources/css, the styling
+// counterpart of the package pages resolved below. Imported after app.css so
+// a package can restyle what core draws; core names no package and no style.
+import.meta.glob('../../vendor/*/*/resources/css/*.css', { eager: true });
+
 import { createInertiaApp, router } from '@inertiajs/react';
 import axios from 'axios';
 import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
+import { createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { route as routeFn } from 'ziggy-js';
+import { PasswordConfirmationDialog } from './components/password-confirmation-dialog';
 import { initializeTheme } from './hooks/use-appearance';
 import { xsrfCookieName } from './lib/xsrf';
 
@@ -17,7 +24,17 @@ declare global {
 // names that cookie after itself so a neighbouring Laravel app on the same
 // hostname cannot overwrite it — so axios has to be told. Without this,
 // every write 419s the moment a neighbour answers a request.
-axios.defaults.xsrfCookieName = xsrfCookieName();
+//
+// Set on every request rather than once here: an SPA-style Inertia visit
+// (a redirect after a POST, for instance) never re-runs this module, so a
+// value captured once at load can go stale the moment the server rotates
+// the cookie mid-session — the exact failure xsrf.ts's own docblock warns
+// about, and the reason it says to read the name fresh on every call.
+axios.interceptors.request.use((config) => {
+    config.xsrfCookieName = xsrfCookieName();
+
+    return config;
+});
 
 /**
  * The suffix on every browser tab title.
@@ -65,7 +82,21 @@ createInertiaApp({
 
         const root = createRoot(el);
 
-        root.render(<App {...props} />);
+        // The password dialog sits beside every page rather than in any
+        // one layout: the writes it answers for are spread across the
+        // staff shell, the settings screens and every portal theme, and
+        // it needs the page context (translations) the children of <App>
+        // are given. The page itself renders as Inertia would on its own.
+        root.render(
+            <App {...props}>
+                {({ Component, props: pageProps, key }) => (
+                    <>
+                        {createElement(Component, { key, ...pageProps })}
+                        <PasswordConfirmationDialog />
+                    </>
+                )}
+            </App>,
+        );
     },
     progress: {
         color: '#4B5563',

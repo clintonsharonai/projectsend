@@ -78,6 +78,18 @@ class FileResource extends JsonResource
             'expires_at' => $this->expires_at?->toIso8601String(),
             'expired' => $this->isExpired(),
 
+            // What the virus scanner made of this file. `pending` and
+            // `infected` mean the bytes are not available: the download
+            // endpoint answers 423 for both, and a caller that has just
+            // uploaded should poll this rather than the download. `note`
+            // carries the threat name, or why a file was not scanned.
+            'scan' => [
+                'status' => $this->scan_status->value,
+                'available' => $this->scan_status->isAvailable(),
+                'note' => $this->scan_note,
+                'scanned_at' => $this->scanned_at?->toIso8601String(),
+            ],
+
             // Null when the file may be downloaded any number of times.
             // `download_limit_scope` says what the number counts —
             // "total" across everyone, or "per_user" for each person
@@ -117,9 +129,11 @@ class FileResource extends JsonResource
                 'name' => $this->nextVersion->name,
             ]),
 
+            // GET /folders/{id} has the rest, its place in the tree included.
             'folder' => $this->whenLoaded('folder', fn (): ?array => $this->folder === null ? null : [
                 'id' => $this->folder->id,
                 'name' => $this->folder->name,
+                'parent_id' => $this->folder->parent_id,
             ]),
 
             // Name only. The uploader is a user record; their email address

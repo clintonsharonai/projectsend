@@ -7,6 +7,7 @@ use App\Modules\Comments\Http\Controllers\CommentSettingsController;
 use App\Modules\Files\Http\Controllers\DownloadSettingsController;
 use App\Modules\Files\Http\Controllers\FileRetentionSettingsController;
 use App\Modules\Files\Http\Controllers\UploadSettingsController;
+use App\Modules\Files\Http\Controllers\VirusScanningSettingsController;
 use App\Modules\Identity\Http\Controllers\ApiTokensController;
 use App\Modules\Identity\Http\Controllers\ConnectedAccountsController;
 use App\Modules\Identity\Http\Controllers\CustomerTokensController;
@@ -62,6 +63,12 @@ Route::middleware('auth')->group(function () {
     Route::put('settings/password', [PasswordController::class, 'update'])
         ->middleware('throttle:6,1,password-update')
         ->name('password.update');
+    // An account without a password asks for one by email instead: see
+    // PasswordController::sendLink. Its own bucket, and a small one, since
+    // each request sends an email.
+    Route::post('settings/password/link', [PasswordController::class, 'sendLink'])
+        ->middleware('throttle:3,1,password-link')
+        ->name('password.link');
 
     Route::get('settings/two-factor', [TwoFactorEnrollmentController::class, 'show'])->name('two-factor.show');
 
@@ -199,12 +206,31 @@ Route::middleware('auth')->group(function () {
         Route::patch('system/settings/security', [SecuritySettingsController::class, 'update'])->name('system-settings.security.update');
         Route::get('system/settings/clients', [ClientSettingsController::class, 'edit'])->name('system-settings.clients.edit');
         Route::patch('system/settings/clients', [ClientSettingsController::class, 'update'])->name('system-settings.clients.update');
+        // A POST rather than part of the PATCH above: it writes a folder per
+        // client, which is not something saving a preferences form should do
+        // as a side effect. See ClientSettingsController::backfillHomeFolders.
+        Route::post('system/settings/clients/home-folders', [ClientSettingsController::class, 'backfillHomeFolders'])
+            ->name('system-settings.clients.home-folders');
         Route::get('system/settings/uploads', [UploadSettingsController::class, 'edit'])->name('system-settings.uploads.edit');
         Route::patch('system/settings/uploads', [UploadSettingsController::class, 'update'])->name('system-settings.uploads.update');
         Route::get('system/settings/downloads', [DownloadSettingsController::class, 'edit'])->name('system-settings.downloads.edit');
         Route::patch('system/settings/downloads', [DownloadSettingsController::class, 'update'])->name('system-settings.downloads.update');
         Route::get('system/settings/file-retention', [FileRetentionSettingsController::class, 'edit'])->name('system-settings.file-retention.edit');
         Route::patch('system/settings/file-retention', [FileRetentionSettingsController::class, 'update'])->name('system-settings.file-retention.update');
+        Route::get('system/settings/virus-scanning', [VirusScanningSettingsController::class, 'edit'])->name('system-settings.virus-scanning.edit');
+        Route::patch('system/settings/virus-scanning', [VirusScanningSettingsController::class, 'update'])->name('system-settings.virus-scanning.update');
+        // Named buckets, like the email and CAPTCHA test buttons beside
+        // them: both of these reach out or start work, and neither should
+        // be a button somebody can sit on.
+        Route::post('system/settings/virus-scanning/test', [VirusScanningSettingsController::class, 'test'])
+            ->middleware('throttle:12,1,scanner-test')->name('system-settings.virus-scanning.test');
+        // Polled every few seconds while the Activity tab is open, so it
+        // is a plain JSON read with its own generous bucket rather than
+        // an Inertia render.
+        Route::get('system/settings/virus-scanning/activity', [VirusScanningSettingsController::class, 'activity'])
+            ->middleware('throttle:120,1,scanner-activity')->name('system-settings.virus-scanning.activity');
+        Route::post('system/settings/virus-scanning/scan-existing', [VirusScanningSettingsController::class, 'scanExisting'])
+            ->middleware('throttle:6,1,scanner-backfill')->name('system-settings.virus-scanning.scan-existing');
         Route::get('system/settings/comments', [CommentSettingsController::class, 'edit'])->name('system-settings.comments.edit');
         Route::patch('system/settings/comments', [CommentSettingsController::class, 'update'])->name('system-settings.comments.update');
         Route::get('system/settings/email', [EmailSettingsController::class, 'edit'])->name('system-settings.email.edit');
@@ -291,6 +317,9 @@ Route::middleware('auth')->group(function () {
             Route::get('system/settings/branding', [BrandingController::class, 'edit'])->name('branding.edit');
             Route::post('system/settings/branding', [BrandingController::class, 'store'])->name('branding.store');
             Route::delete('system/settings/branding', [BrandingController::class, 'destroy'])->name('branding.destroy');
+            Route::patch('system/settings/branding/site-name', [BrandingController::class, 'updateSiteName'])->name('branding.site-name.update');
+            Route::patch('system/settings/branding/logo/crop', [BrandingController::class, 'cropLogo'])->name('branding.logo.crop');
+            Route::delete('system/settings/branding/logo/crop', [BrandingController::class, 'restoreLogo'])->name('branding.logo.restore');
 
             // POST rather than PATCH: the form carries a file, so it is
             // multipart, and PHP only populates $_FILES for POST.

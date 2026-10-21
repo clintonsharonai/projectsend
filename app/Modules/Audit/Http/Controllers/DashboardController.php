@@ -17,6 +17,9 @@ use App\Modules\Clients\ClientStorageUsage;
 use App\Modules\Files\Access\StaffLibraryScope;
 use App\Modules\Files\Delivery\FileDelivery;
 use App\Modules\Files\Models\File;
+use App\Modules\Files\Scanning\ScanningConfig;
+use App\Modules\Files\Scanning\ScanStatus;
+use App\Modules\Files\Scanning\VirusScanner;
 use App\Modules\Groups\Models\Group;
 use App\Modules\Identity\UserType;
 use App\Modules\Platform\Capabilities\Capability;
@@ -27,6 +30,7 @@ use App\Modules\Platform\News\NewsItems;
 use App\Modules\Platform\Settings\Setting;
 use App\Modules\Platform\Settings\Settings;
 use App\Modules\Platform\Storage\StorageDurability;
+use App\Modules\Platform\Storage\StorageCapacity;
 use App\Modules\Platform\System\SystemEnvironment;
 use App\Modules\Platform\Updates\LatestReleaseInfo;
 use Illuminate\Database\Eloquent\Builder;
@@ -53,6 +57,7 @@ class DashboardController extends Controller
         private readonly Settings $settings,
         private readonly ApiUsage $apiUsage,
         private readonly StorageDurability $storageDurability,
+        private readonly StorageCapacity $storageCapacity,
         private readonly FileDelivery $fileDelivery,
         private readonly Installation $installation,
         private readonly TimezoneRegistry $timezones,
@@ -95,7 +100,7 @@ class DashboardController extends Controller
                 : null,
             'largest_files' => $canStatistics && $prefs->isEnabled($user, 'largest_files') ? $this->largestFiles($user) : null,
             'recent' => $canActionsLog && $prefs->isEnabled($user, 'recent') ? $this->recentActivity($user) : null,
-            'system' => $canSystem && $prefs->isEnabled($user, 'system') ? $this->systemInfo() : null,
+            'system' => $canSystem && $prefs->isEnabled($user, 'system') ? $this->systemInfo($user) : null,
             // Both editions — informational content, not an update action,
             // so no Capability check alongside the permission (unlike
             // 'system' above).
@@ -480,12 +485,10 @@ class DashboardController extends Controller
     }
 
     /**
-     * @return array<string, array<string, bool|string|null>|bool|int|string|null>
+     * @return array<string, array<string, bool|int|string|null>|bool|int|string|null>
      */
-    private function systemInfo(): array
+    private function systemInfo(User $viewer): array
     {
-        $freeBytes = @disk_free_space(storage_path('app/files'));
-
         // Cached by CheckForUpdatesCommand (daily) — never a live HTTP
         // call from the request path. null means either no successful
         // check yet, or the current version is already the latest.
@@ -494,7 +497,7 @@ class DashboardController extends Controller
         return [
             ...$this->environment->toArray(),
             'storage_used_bytes' => (int) File::query()->sum('size'),
-            'storage_free_bytes' => $freeBytes === false ? -1 : (int) $freeBytes,
+            ...$this->storageCapacity->inspect($viewer),
             'update_available' => $release !== null,
             'latest_version' => $release['version'] ?? null,
             'release_url' => $release['url'] ?? null,
@@ -511,6 +514,74 @@ class DashboardController extends Controller
             // able to confirm at a glance, not only worth warning about
             // when it is false — the same reasoning as storage_durability.
             'file_delivery' => $this->fileDelivery->describe(),
+            // Always stated, like delivery and storage above it: "my
+            // uploads are checked by ClamAV" is worth confirming at a
+            // glance, not only worth mentioning when it is false. Null
+            // only where this installation does not connect its own
+            // scanner at all.
+            'scanning' => $this->scanningState(),
+            // Rows this installation lists and cannot produce. Zero is the
+            // ordinary answer and says nothing on screen; anything else is
+            // somebody's files gone, which is worth interrupting for.
+            'missing_files' => File::query()->where('scan_status', ScanStatus::Missing)->count(),
+        ];
+    }
+
+    /**
+     * Where this installation stands with virus scanning.
+     *
+     * Reported whether or not anything is wrong: the System card states
+     * how downloads leave and where files are stored for the same reason,
+     * and "nothing is checking my uploads" is exactly the fact an
+     * administrator will not go looking for.
+     *
+     * Null only when this installation does not connect its own scanner —
+     * on a hosted one that is the platform's infrastructure, and a tenant
+     * reading about it could neither confirm nor fix it. See
+     * Capability::VirusScanningConnect.
+     *
+     * @return array{configured: bool, reachable: bool, engine: string|null, definitions_age_hours: int|null, let_through_24h: int, pending: int}|null
+     */
+    private function scanningState(): ?array
+    {
+        if (! $this->capabilities->has(Capability::VirusScanningConnect)) {
+            return null;
+        }
+
+        $config = app(ScanningConfig::class);
+
+        if (! $config->enabled()) {
+            return [
+                'configured' => false,
+                'reachable' => false,
+                'engine' => null,
+                'definitions_age_hours' => null,
+                'let_through_24h' => 0,
+                'pending' => 0,
+            ];
+        }
+
+        $scanner = app(VirusScanner::class)->status();
+
+        return [
+            'configured' => true,
+            'reachable' => $scanner->reachable,
+            'engine' => $scanner->engine,
+            'definitions_age_hours' => $scanner->definitionsAgeHours(),
+            // Files let through unchecked in the last day that can still
+            // be downloaded. Zero is the only number that means
+            // "protected"; anything else is a scanner that was down, or
+            // files nobody could open. See File::scopeLetThrough().
+            'let_through_24h' => File::query()
+                ->letThrough()
+                ->where('scanned_at', '>=', now()->subDay())
+                ->count(),
+            // Waiting more than an hour: on an installation set to hold,
+            // this is what an outage looks like.
+            'pending' => File::query()
+                ->where('scan_status', ScanStatus::Pending)
+                ->where('created_at', '<=', now()->subHour())
+                ->count(),
         ];
     }
 

@@ -11,6 +11,8 @@ use App\Modules\Files\Uploads\UploadExtensionPolicy;
 use App\Modules\Platform\Settings\ExternalStorageConfigApplier;
 use App\Modules\Platform\Settings\ExternalStorageSettings;
 use Illuminate\Support\Facades\Storage;
+use League\Flysystem\WhitespacePathNormalizer;
+use Throwable;
 
 /**
  * Finds files sitting on disk with no corresponding File row — v1
@@ -101,6 +103,26 @@ class OrphanFileScanner
     }
 
     /**
+     * Every orphan the search matches that $viewer may import: the same
+     * rule as isImportable(), applied to a whole scan. Taken from a fresh
+     * scan, so unlike a client-supplied list it needs no per-path re-check.
+     *
+     * @return list<array{disk: string, path: string}>
+     */
+    public function importable(User $viewer, ?string $search = null): array
+    {
+        $importable = [];
+
+        foreach ($this->scan($viewer, $search) as $orphan) {
+            if ($orphan['allowed'] && $orphan['size'] > 0) {
+                $importable[] = ['disk' => $orphan['disk'], 'path' => $orphan['path']];
+            }
+        }
+
+        return $importable;
+    }
+
+    /**
      * Re-validated at import/delete time — never trust a client-supplied
      * disk/path just because it was in an earlier scan response. $disk
      * must be one of scannedDisks()'s current keys — a client could
@@ -112,11 +134,38 @@ class OrphanFileScanner
             return false;
         }
 
+        if (! $this->isCanonical($path)) {
+            return false;
+        }
+
         if ($this->isExcluded($path) || ! Storage::disk($disk)->exists($path)) {
             return false;
         }
 
         return ! in_array($path, $this->knownPaths($disk), true);
+    }
+
+    /**
+     * Whether the storage layer would act on exactly this spelling.
+     *
+     * Flysystem rewrites a path before it touches storage: "./a/b.txt",
+     * "a/./b.txt", "a//b.txt", "/a/b.txt", "a\b.txt" and "a/x/../b.txt"
+     * all become "a/b.txt". The checks here compare strings, so any of
+     * those made a file somebody owns look like an orphan, and deleting or
+     * adopting it then reached the real file (GHSA-pv88-7863-5hwq). The
+     * scan only offers paths as storage lists them, already canonical, so
+     * a path that would be rewritten did not come from the scan and is
+     * refused rather than repaired.
+     */
+    private function isCanonical(string $path): bool
+    {
+        try {
+            return (new WhitespacePathNormalizer)->normalizePath($path) === $path;
+        } catch (Throwable) {
+            // A path climbing out of the root, or carrying control
+            // characters, is refused by the normalizer itself.
+            return false;
+        }
     }
 
     public function isAllowedFor(User $viewer, string $path): bool

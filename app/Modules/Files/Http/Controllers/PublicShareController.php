@@ -11,6 +11,9 @@ use App\Modules\Files\Access\DownloadAllowance;
 use App\Modules\Files\Delivery\StoredFileResponse;
 use App\Modules\Files\Models\Category;
 use App\Modules\Files\Models\File;
+use App\Modules\Files\Scanning\FileAvailability;
+use App\Modules\Files\Scanning\ScanningConfig;
+use App\Modules\Files\Scanning\ScanStatus;
 use App\Modules\Files\Models\ShareLink;
 use Illuminate\Http\RedirectResponse;
 use Inertia\Inertia;
@@ -29,6 +32,8 @@ class PublicShareController extends Controller
         private readonly ActivityLogger $activity,
         private readonly DownloadAllowance $allowance,
         private readonly StoredFileResponse $bytes,
+        private readonly FileAvailability $availability,
+        private readonly ScanningConfig $scanning,
     ) {}
 
     public function show(string $token): InertiaResponse
@@ -36,7 +41,12 @@ class PublicShareController extends Controller
         $shareLink = ShareLink::query()->where('token', $token)->first();
         $file = $shareLink?->shareable;
 
-        if ($shareLink === null || ! $file instanceof File) {
+        // A withdrawn file answers exactly as a link that never existed.
+        // Its uploader deleted their account, and "this was here once" is
+        // itself something they asked to stop saying. The link row stays,
+        // so an account that is restored is served again. See
+        // SelfDeletion.
+        if ($shareLink === null || ! $file instanceof File || $file->isWithdrawn()) {
             return Inertia::render('share/show', ['status' => 'not_found']);
         }
 
@@ -45,6 +55,16 @@ class PublicShareController extends Controller
         // so a link outliving it would be a way around that revocation.
         if ($shareLink->isExpired() || $file->isExpired()) {
             return Inertia::render('share/show', ['status' => 'expired']);
+        }
+
+        // A link can be minted the moment a file is stored — the hosted
+        // free plan does exactly that — so the link routinely exists
+        // before the scanner has finished. It says so rather than 404ing:
+        // the visitor was sent a real link and it will work shortly.
+        if (! $this->availability->isAvailable($file)) {
+            return Inertia::render('share/show', [
+                'status' => $file->scan_status === ScanStatus::Pending ? 'checking' : 'unavailable',
+            ]);
         }
 
         // Two separate caps reach the same page: the link's own
@@ -71,6 +91,11 @@ class PublicShareController extends Controller
                     ])->values()->all(),
             ],
             'download_url' => route('share.download', $token),
+            // Said to the one person who can neither see the setting nor
+            // chose it. The uploader and the staff library both show this
+            // file as "not scanned"; whoever follows the link had no way
+            // of knowing.
+            'unscanned' => $this->scanning->enabled() && $file->wasLetThrough(),
         ]);
     }
 
@@ -79,7 +104,13 @@ class PublicShareController extends Controller
         $shareLink = ShareLink::query()->where('token', $token)->first();
         $file = $shareLink?->shareable;
 
-        if ($shareLink === null || ! $file instanceof File || $shareLink->isExpired() || $file->isExpired()) {
+        if ($shareLink === null || ! $file instanceof File || $file->isWithdrawn() || $shareLink->isExpired() || $file->isExpired()) {
+            return redirect()->route('share.show', $token);
+        }
+
+        // Same for a file still being checked, and for the same reason
+        // the limit is asked before the counter moves.
+        if (! $this->availability->isAvailable($file)) {
             return redirect()->route('share.show', $token);
         }
 

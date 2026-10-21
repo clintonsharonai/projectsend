@@ -41,11 +41,18 @@ jobs:
     # `issue.pull_request` is present only when the comment is on a pull
     # request; comments on ordinary issues have nothing for this action to
     # check.
+    #
+    # Loose on purpose, never `==`. This only decides whether a runner
+    # starts; whether a comment is a signature is decided by the action,
+    # strictly, against `custom-pr-sign-comment` below. An exact match here
+    # threw away a real signature that arrived with trailing line breaks
+    # ("...sign the CLA\r\n\r\n"), which the action -- it trims first --
+    # would have accepted. `contains` and `startsWith` ignore case.
     if: >-
       github.event_name == 'pull_request_target'
       || (github.event.issue.pull_request
-          && (github.event.comment.body == 'recheck'
-              || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+          && (startsWith(github.event.comment.body, 'recheck')
+              || contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')))
     runs-on: ubuntu-latest
     steps:
       - name: CLA check
@@ -74,6 +81,12 @@ jobs:
             Please read the **[CLA]($pathToCLADocument)**, then post exactly this as a comment
             on this pull request:
 
+          # Not decoration, although it repeats the action's default phrase.
+          # Set, it makes the action compare the whole comment, trimmed and
+          # lowercased, against it. Unset, the action searches the comment
+          # for the phrase instead, and "I LIE, I have read the CLA Document
+          # and I hereby sign the CLA. I do not sign it" on one line would
+          # be recorded as a signature.
           custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
           custom-allsigned-prcomment: 'CLA signed — thanks. A maintainer will review this shortly.'
           lock-pullrequest-aftermerge: false

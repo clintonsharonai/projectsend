@@ -10,8 +10,11 @@ use App\Modules\Audit\ActivityLog;
 use App\Modules\Files\Access\SharingIdentity;
 use App\Modules\Files\DownloadLimitScope;
 use App\Modules\Files\FileDiskCleanup;
+use App\Modules\Files\Scanning\NotScannedReason;
+use App\Modules\Files\Scanning\ScanStatus;
 use App\Modules\Files\Versions\FileVersions;
 use App\Modules\Groups\Models\Group;
+use App\Modules\Identity\Erasure\SelfDeletion;
 use App\Support\Concerns\HasUniqueSlug;
 use Database\Factories\FileFactory;
 use Illuminate\Database\Eloquent\Builder;
@@ -40,6 +43,14 @@ use Illuminate\Support\Carbon;
  * @property string $mime_type
  * @property int $size
  * @property string $checksum
+ * @property ScanStatus $scan_status
+ * @property string|null $scan_note the threat name, or a NotScannedReason
+ * @property Carbon|null $scanned_at
+ * @property string|null $scan_engine
+ * @property int $scan_attempts
+ * @property bool $scan_was_available
+ * @property int|null $released_by
+ * @property Carbon|null $released_at
  * @property bool $public
  * @property Carbon|null $expires_at
  * @property int|null $download_limit
@@ -74,6 +85,14 @@ class File extends Model
     {
         return [
             'public' => 'boolean',
+            // Where this file stands with the virus scanner. Cast to the
+            // enum so nothing compares raw strings — see ScanStatus and
+            // FileAvailability.
+            'scan_status' => ScanStatus::class,
+            'scanned_at' => 'datetime',
+            'released_at' => 'datetime',
+            'scan_attempts' => 'integer',
+            'scan_was_available' => 'boolean',
             'commentable' => 'boolean',
             'expires_at' => 'datetime',
             'download_limit' => 'integer',
@@ -272,11 +291,135 @@ class File extends Model
     }
 
     /**
+     * Files the virus scanner has finished with, one way or another.
+     *
+     * Sits beside notExpired() in every scope that answers "what may this
+     * person be shown", and for the same reason: a file nobody has
+     * checked yet is not a file anybody may be handed. The uploader is
+     * the exception while it is being checked — their own upload stays on
+     * their screen, because a file that vanishes for ten minutes after
+     * you send it reads as a failed upload.
+     *
+     * Only while it is being checked. A quarantined or missing upload
+     * stayed listed for its uploader too, with a download button that
+     * answered with an error page; they are told about a blocked upload
+     * by notification instead, and there is nothing to offer them here.
+     *
+     * @param  Builder<File>  $query
+     */
+    public function scopeAvailable(Builder $query, ?User $viewer = null): void
+    {
+        $query->where(function (Builder $inner) use ($viewer): void {
+            $inner->whereIn('scan_status', ScanStatus::availableValues());
+
+            if ($viewer !== null) {
+                $inner->orWhere(fn (Builder $own) => $own
+                    ->where('uploaded_by', $viewer->id)
+                    ->where('scan_status', ScanStatus::Pending));
+            }
+        });
+    }
+
+    /**
+     * Why a file went out unchecked. Deliberately not
+     * NotScannedReason::BeforeScanning: a file stored while this
+     * installation did not scan at all is not a scanner letting something
+     * past, and on an installation that has never scanned it would mean
+     * saying it about every file there is.
+     *
+     * @var list<string>
+     */
+    private const LET_THROUGH_REASONS = [
+        NotScannedReason::ScannerUnavailable->value,
+        NotScannedReason::TooLarge->value,
+        NotScannedReason::Encrypted->value,
+    ];
+
+    /**
+     * Files people can download that nothing checked: let through while
+     * the scanner was down, or because it could not open them.
+     *
+     * A state, not a history. The dashboard used to count "let through"
+     * entries in the activity log, which counted a file once per attempt,
+     * and went on counting files that had since been deleted, gone
+     * missing or been scanned clean — none of which is going out
+     * unscanned.
+     *
+     * @param  Builder<File>  $query
+     */
+    public function scopeLetThrough(Builder $query): void
+    {
+        $query->where('scan_status', ScanStatus::NotScanned)
+            ->whereIn('scan_note', self::LET_THROUGH_REASONS);
+    }
+
+    /**
+     * Whether this particular file is one of those — the row's own answer
+     * to scopeLetThrough(), for a page that already has the file.
+     */
+    public function wasLetThrough(): bool
+    {
+        return $this->scan_status === ScanStatus::NotScanned
+            && in_array((string) $this->scan_note, self::LET_THROUGH_REASONS, true);
+    }
+
+    /**
+     * Files nothing has ever looked at.
+     *
+     * Two ways to be one, and the second is the common one: a file stored
+     * while scanning was off carries the reason, and a file that predates
+     * the scanner entirely carries none at all — the migration gives the
+     * column its default and writes no note, and the v1 import inserts
+     * rows the same way. Reading only the reason missed every file on
+     * every real installation, which is exactly the set "Scan existing
+     * files" exists for.
+     *
+     * @param  Builder<File>  $query
+     */
+    public function scopeNeverScanned(Builder $query): void
+    {
+        $query->where('scan_status', ScanStatus::NotScanned)
+            ->where(fn (Builder $inner) => $inner
+                ->whereNull('scan_note')
+                ->orWhere('scan_note', NotScannedReason::BeforeScanning->value));
+    }
+
+    /**
      * @param  Builder<File>  $query
      */
     public function scopeNotExpired(Builder $query): void
     {
         $query->where(fn (Builder $q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', now()));
+    }
+
+    /**
+     * Files whose uploader has not deleted their own account — the first
+     * rule in SelfDeletion. Every surface that serves somebody other than
+     * staff narrows by this: the client scope, and the three public
+     * listing scopes. Single files ask isWithdrawn().
+     *
+     * The null branch is not tidiness. `uploaded_by NOT IN (...)` is never
+     * true for a NULL uploader, so a file whose uploader was erased long
+     * ago would vanish from every client along with the withdrawn ones.
+     *
+     * @param  Builder<File>  $query
+     */
+    public function scopeNotWithdrawn(Builder $query): void
+    {
+        $query->where(fn (Builder $q) => $q
+            ->whereNull('uploaded_by')
+            ->orWhereNotIn('uploaded_by', app(SelfDeletion::class)->withdrawnAccounts()));
+    }
+
+    /**
+     * The single-file twin of scopeNotWithdrawn(). Asked by the routes
+     * that reach one file without an account behind them — share links
+     * and the public listing — which have no client scope to lean on.
+     */
+    public function isWithdrawn(): bool
+    {
+        return $this->uploaded_by !== null
+            && app(SelfDeletion::class)->withdrawnAccounts()->whereKey($this->uploaded_by)->exists();
     }
 
     /**
@@ -317,6 +460,41 @@ class File extends Model
     }
 
     /**
+     * The query-side twin of isEffectivelyPublic(): narrow to files that
+     * are, or are not, publicly reachable.
+     *
+     * Here rather than in a controller because two surfaces now ask it --
+     * the staff library's visibility filter and /api/v1/files -- and a
+     * predicate that has to agree with isEffectivelyPublic() should not
+     * exist twice. The folder half resolves once into a list of ids rather
+     * than as a correlated subquery, because Folder::scopePubliclyVisible()
+     * already expresses the subtree rule and is the only place it lives.
+     *
+     * The null branch in the private half is not tidiness: `folder_id NOT
+     * IN (...)` is never true for a NULL folder_id, so a file at the
+     * library root would otherwise be neither public nor private and
+     * vanish from both halves of the filter.
+     *
+     * @param  Builder<File>  $query
+     */
+    public function scopeEffectivelyPublic(Builder $query, bool $public): void
+    {
+        $publicFolderIds = Folder::query()->publiclyVisible()->pluck('id')->all();
+
+        if ($public) {
+            $query->where(fn (Builder $inner) => $inner
+                ->where('files.public', true)
+                ->orWhereIn('files.folder_id', $publicFolderIds));
+
+            return;
+        }
+
+        $query->where('files.public', false)->where(fn (Builder $inner) => $inner
+            ->whereNull('files.folder_id')
+            ->orWhereNotIn('files.folder_id', $publicFolderIds));
+    }
+
+    /**
      * A client can access a file that is assigned to them directly or
      * via a group, that sits in a folder shared with them (self or
      * ancestor), or that they uploaded themselves via the portal — the
@@ -352,7 +530,9 @@ class File extends Model
             $outer->orWhere('uploaded_by', $client->id);
         });
 
-        $query->notExpired();
+        // Withdrawn last, beside expiry, because it is the same kind of
+        // rule: not "who may see this" but "may anybody besides staff".
+        $query->notExpired()->notWithdrawn()->available($client);
     }
 
     /**
@@ -393,7 +573,7 @@ class File extends Model
             $outer->orWhereIn('folder_id', $subtreeFolderIds);
         });
 
-        $query->notExpired();
+        $query->notExpired()->notWithdrawn()->available();
     }
 
     /**
@@ -407,7 +587,7 @@ class File extends Model
      */
     public function scopePubliclyVisibleForFolder(Builder $query, Folder $folder): void
     {
-        $query->whereIn('folder_id', $folder->subtreeFolderIds())->notExpired();
+        $query->whereIn('folder_id', $folder->subtreeFolderIds())->notExpired()->notWithdrawn()->available();
     }
 
     /**
@@ -458,6 +638,8 @@ class File extends Model
             ->where(function (Builder $folder) use ($publicFolderSubtreeIds): void {
                 $folder->whereNull('folder_id')->orWhereNotIn('folder_id', $publicFolderSubtreeIds);
             })
-            ->notExpired();
+            ->notExpired()
+            ->notWithdrawn()
+            ->available();
     }
 }

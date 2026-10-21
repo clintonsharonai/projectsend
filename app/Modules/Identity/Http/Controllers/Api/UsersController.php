@@ -160,6 +160,11 @@ class UsersController extends Controller
      *
      * Refused with a 422 if the change would leave the installation with
      * no active administrator, or if you would be deactivating yourself.
+     *
+     * Your own email address and password cannot be changed here: that is
+     * a `403`. Change them from your profile in the web interface, which
+     * asks for your current password. Setting somebody else's password
+     * signs them out of the API: every token they hold is revoked.
      */
     public function update(Request $request, User $user): StaffUserResource
     {
@@ -181,6 +186,15 @@ class UsersController extends Controller
             // client can see, so it follows the same rule as role_id above.
             'assigned_clients.*' => ['integer', Rule::in($this->accounts->assignableClientIds($actor))],
         ]);
+
+        // Your own email address and password are changed from your
+        // profile, which asks for your current password. A token cannot be
+        // asked for one, so here the answer is no.
+        abort_if(
+            $this->accounts->ownCredentialChanges($actor, $user, $validated['email'] ?? null, $validated['password'] ?? null) !== [],
+            403,
+            __('Change your own email address and password from your profile.'),
+        );
 
         // Read through Request::boolean() rather than off the validated
         // array, for the reason RolesController::guardScopeRemoval spells
@@ -269,12 +283,22 @@ class UsersController extends Controller
      * The account holder is emailed that this happened, and the action is
      * recorded in the activity log against the caller. Answers 204 whether
      * or not a second factor was actually in force.
+     *
+     * Not for your own account, which is a `403`: remove your own second
+     * factor from your profile in the web interface.
      */
     public function destroyTwoFactor(Request $request, User $user, TwoFactorAdministration $twoFactor): JsonResponse
     {
         abort_unless($user->isStaff(), 404);
 
-        $this->accounts->guardTarget($this->actor($request), $user);
+        $actor = $this->actor($request);
+        $this->accounts->guardTarget($actor, $user);
+
+        // The web asks for your password before this (password.confirm),
+        // and a token cannot give one. On your own account it would let a
+        // token clear the second factor standing between it and a browser
+        // session as you.
+        abort_if($user->is($actor), 403, __('Remove your own two-factor authentication from your profile.'));
 
         $twoFactor->reset($user);
 

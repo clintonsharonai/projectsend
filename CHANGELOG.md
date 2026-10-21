@@ -10,6 +10,203 @@ Anything under **⚠️ Important — do these yourself** is something you have 
 we did. It sits at the top of a release for that reason. Older entries call the same section
 **Upgrade notes**.
 
+## 2.7.0 — 6 October 2026
+
+Four security fixes, folders you can manage over the API, and logo cropping.
+
+### ⚠️ Important — do these yourself
+
+Everything else in this release happens on its own, and nothing here stops the upgrade.
+
+- **If your installation cannot send email, accounts that sign in through Google, Microsoft or
+  another provider can no longer set their own first password.** The link to set it now arrives by
+  email. Until mail works, an administrator can set the password from the person's account screen.
+- **If an integration changes its own account's email address, password or two-factor
+  authentication through the API, it now gets a 403.** Do that from the profile screen instead.
+  Changing somebody else's still works as before.
+
+**Added**
+
+- **Folders in the API**: list, create, rename, move, delete and share them, and see where each one
+  sits in the tree.
+- **Crop your logo** from Branding → Logo, and put the original back at any time.
+- **"Import all" on the orphan files screen** adopts every match in the background and shows its
+  progress.
+- **LDAP clients can sign in with their username** as well as their email address, once you name the
+  username attribute in Settings → LDAP.
+
+**Security**
+
+- An API token can no longer change its own owner's password, email address or two-factor
+  authentication, and setting somebody else's password now signs them out of the API.
+- The staff screen no longer changes your own email address or password without your current
+  password.
+- An account that signs in through a provider now gets its first password from a link sent to its
+  own email, not from whoever holds its browser session.
+- A staff member limited to some clients now sees and revokes only their own invitations and those
+  into their clients' groups.
+- A staff member limited to some clients no longer sees the names of folders above the ones they can
+  reach.
+- The orphan file tool can no longer be pointed at a file that belongs to somebody.
+- Creating a folder inside a public folder now needs permission to publish.
+
+**Changed**
+
+- **Your logo is shown larger** on the sign-in and download pages.
+- **The API token screen warns you** when "Edit clients" or "Edit users" is chosen: a token with
+  either can sign in as the accounts it may edit.
+- The Docker image no longer fills its log with passing health checks; failing ones still show.
+
+**Fixed**
+
+- In the client portal, changing the sort inside a folder no longer jumps back to the top, and the
+  chosen sort stays when you open a folder.
+- Third-party libraries are updated, including fixes for published security advisories.
+
+Thanks to [@simjiun](https://github.com/simjiun), [@sbouabid-sec](https://github.com/sbouabid-sec),
+[@veenone](https://github.com/veenone), [@jiits](https://github.com/jiits),
+[@cookiebaker](https://github.com/cookiebaker) and
+[@01110111000001](https://github.com/01110111000001) for reporting and fixing.
+
+### Issues closed since 2.6.0
+
+The summary above is what changed. This is the paper trail, for anyone who wants to read the
+original report.
+
+- [#1798](https://github.com/projectsend/projectsend/issues/1798) — [ Feature request ] Branding : Site Name, Logo Size and Image Crop
+- [#1806](https://github.com/projectsend/projectsend/issues/1806) — Sorting doesn't work with subfolders
+
+## 2.6.0 — 25 September 2026
+
+Mostly fixes: files and folders are easier to tidy, the sign-in pages carry your brand better, and
+someone who deletes their own account stops being published straight away.
+
+**Added**
+
+- **Delete several files at once** from the selection bar on the Files page, with one confirmation.
+- **Upload inside a folder puts the files in that folder**, and brings you back to it afterwards.
+- **Show your site name under the logo** on the sign-in and download pages, from Branding → Logo.
+- **Choose what happens to someone's files when they delete their own account**: removed right away,
+  or at the end of the grace period — and whether that applies to everyone or only to clients.
+  Found under Settings → Privacy.
+
+**Changed**
+
+- **A deleted account's files stop being shared at once.** From the moment someone deletes their own
+  account, their files are visible only to staff — not to the clients and groups they were shared
+  with, not through share links, not on the public pages — until the account is erased. Restoring
+  the account brings them back.
+- **Your logo is shown larger on the sign-in and download pages**, so a square logo is clearly
+  visible. The Branding screen now says what size to use.
+
+**Fixed**
+
+- Saving a settings form could show an error dialog containing `{"count":0}` instead of saving.
+- A file upload running several parts at once could be refused near the end with "too large".
+- The System card reported the server's free disk space as file storage on installations that keep
+  files in S3; it now shows the two separately.
+- Confirming your password no longer throws away the form you were filling in.
+- LDAP accounts can now get past the password confirmation, which kept them from turning on
+  two-factor authentication.
+- With per-client folders on, a client choosing "No folder" moved the file out of their own folder.
+- PHP 8.5 no longer prints deprecation warnings from the database configuration.
+- The Docker quick start now saves `compose.yaml`, so the `docker compose` commands in the other
+  guides work as written. If you saved `compose.example.yaml`, rename it to `compose.yaml`.
+- The Docker and migration guides now cover installing Docker, and migrating from a Legacy install
+  on the same machine.
+
+Thanks to [@JensS](https://github.com/JensS), binghuo, [@lukatong](https://github.com/lukatong),
+[@jjoelc](https://github.com/jjoelc), [@jiits](https://github.com/jiits),
+[@0xVavaldi](https://github.com/0xVavaldi) and [@lolgufdHD](https://github.com/lolgufdHD) for
+reporting and fixing.
+
+### Issues closed since 2.5.0
+
+- [#1635](https://github.com/projectsend/projectsend/issues/1635) — Docs: consider moving the Docker quick start above screenshots
+- [#1795](https://github.com/projectsend/projectsend/issues/1795) — Slightly confused regarding the reviews
+- [#1796](https://github.com/projectsend/projectsend/issues/1796) — PHP 8.5.10: PDO::MYSQL_ATTR_SSL_CA Deprecated Warning
+- [#1799](https://github.com/projectsend/projectsend/issues/1799) — Inertia error from notifications/unread-count because of JSON response
+- [#1800](https://github.com/projectsend/projectsend/issues/1800) — Add Bulk-Edit for Moving and Deleting files
+- [#1801](https://github.com/projectsend/projectsend/issues/1801) — Add Upload into Folder
+
+## 2.5.0 — 18 September 2026
+
+**Added**
+
+- **Uploaded files can be checked for viruses before anyone can download them.**
+- **Files the virus scanner refuses go to a Quarantine screen, where you can read the verdict and
+  release a file if the report is wrong.**
+- **You choose what happens to a file the scanner cannot open, and to uploads arriving while the
+  scanner is unreachable.**
+- **A Test button says which scanner answered and how old its virus definitions are, and fails a
+  scanner that reports password-protected archives as clean.**
+- **The dashboard says when virus scanning has stopped protecting anything.**
+- **Files uploaded before scanning was switched on can be worked through in the background, at a
+  pace you set.**
+- **Invite a client to set their own password instead of handing them one.** Contributed by
+  [@mash2k3](https://github.com/mash2k3).
+- **Staff who administer clients are notified in the bell when a client account appears.**
+- **Client accounts can expire on a date.** Requested by
+  [@Drardollan](https://github.com/Drardollan) in
+  [#1310](https://github.com/projectsend/projectsend/issues/1310).
+- **Each role, and each person, can choose where they land after signing in.** Requested by
+  [@Zodiac1978](https://github.com/Zodiac1978) in
+  [#1777](https://github.com/projectsend/projectsend/issues/1777).
+- **Each client can be given a folder of their own, which becomes their root.**
+- **The file library filters by uploader, by the uploader's role, by public or private, by whether
+  a file was ever downloaded, and by current or outdated version.**
+- **The same five filters are available through the API.**
+- **Files whose bytes have gone missing from storage are found daily and listed on their own
+  screen.**
+- **Clients see on each file the date it stops being available.**
+- **Clients can make a public link for a file they uploaded**, where their role may publish files —
+  the switch that marks a file public now comes with the link it promises, and they can copy or
+  revoke it. Reported by Ricardo Cazati.
+- **A public page says when the file on it was never checked for viruses**, which happens where an
+  installation scans and chooses to let through what the scanner could not read.
+
+**Closed holes in who can see what**
+
+- **A staff member limited to certain clients can no longer reach past that limit through an
+  invitation.** The invitation form listed every group on the installation, and an invited client
+  could be pre-assigned into a group outside that staff member's own clients. Reported by
+  [@hackchang](https://github.com/hackchang).
+
+**Fixed**
+
+- **Setting a folder inside the bucket no longer breaks every page that touches storage.** Reported
+  by [@veenone](https://github.com/veenone) in
+  [#1788](https://github.com/projectsend/projectsend/issues/1788).
+- **The Microsoft sign-in settings now say why new accounts still wait for approval.** They wait
+  until the `xms_edov` optional claim is added to the app registration, because until then Microsoft
+  does not confirm that the person owns the address — which is a rule ProjectSend already had and
+  nothing on screen said. Reported by Ricardo Cazati.
+- **Someone who signs in with Microsoft, Google or another provider can now set a password.** The
+  screen asked for the current one, which such an account never had — so it could not get a
+  password, and therefore could not turn on two-factor authentication. Where two-factor is
+  compulsory, that locked those accounts out of everything. Reported by Ricardo Cazati.
+- **Creating a client with a storage quota typed in no longer answers with an error page.**
+- **A file expiry date sent to the API as a number now answers 422 instead of 500.**
+- **A quarantined file, or one missing from storage, is no longer listed in the library with a
+  download that cannot work.**
+- A dependency advisory in the bundled `js-yaml`.
+
+### Issues closed since 2.4.1
+
+- [#1310](https://github.com/projectsend/projectsend/issues/1310) — expire client accounts
+- [#1658](https://github.com/projectsend/projectsend/issues/1658) — Docker services have no restart
+  policy
+- [#1770](https://github.com/projectsend/projectsend/issues/1770) — Docker upgrade fails with
+  external storage configured
+- [#1776](https://github.com/projectsend/projectsend/issues/1776) — logo gives error 404
+- [#1777](https://github.com/projectsend/projectsend/issues/1777) — customization / branding
+  (start pages)
+- [#1778](https://github.com/projectsend/projectsend/issues/1778) — error 500 on install
+- [#1779](https://github.com/projectsend/projectsend/issues/1779) — client invitations
+- [#1788](https://github.com/projectsend/projectsend/issues/1788) — a bucket folder makes every
+  storage page a 500
+- [#1789](https://github.com/projectsend/projectsend/issues/1789) — S3 not working after an update
+
 ## 2.4.1 — 11 September 2026
 
 ### ⚠️ Important — do these yourself

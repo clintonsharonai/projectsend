@@ -107,9 +107,12 @@ section on its own.
 ### If you installed from a release zip
 
 ```sh
-composer require projectsend/v1-migration-tool
+composer require projectsend/v1-migration-tool --update-no-dev
 php artisan migrate    # creates the tool's two tables
 ```
+
+`--update-no-dev` keeps Composer from also installing the tools ProjectSend is developed and tested
+with. A release zip leaves them out, and a server has no use for them.
 
 That is the whole installation — there is no `npm run build` to run. The zip ships its assets
 already compiled and deliberately without the toolchain that compiled them, so there is no
@@ -177,6 +180,7 @@ are listed at each step.
 |---|---|
 | Legacy and ProjectSend are on the **same machine** | [**Direct**](#step-3a--direct-same-machine) |
 | Legacy is on **another server**, or on hosting you cannot reach from the new box | [**Bundle**](#step-3b--bundle-different-machines) |
+| Legacy runs on this machine's own web server, and ProjectSend runs **in Docker** | **Bundle** — see [below](#legacy-on-this-machine-projectsend-in-docker) |
 
 Direct is faster and simpler. It copies your files by default, and it can also *hardlink* them
 instead when you ask it to — on a single filesystem that writes no bytes at all, so 400 GB migrates
@@ -205,8 +209,63 @@ file bytes:
 | `move` | Takes the bytes out of Legacy. Fast and frees disk — and **cannot be undone** |
 | `defer` | Writes no bytes at all. For importing the database now and moving half a terabyte overnight |
 
-If ProjectSend runs in Docker, the Legacy directory has to be visible **inside the app container**
-— bind-mount it there, and use the container's path, not the host's.
+If ProjectSend runs in Docker, Direct needs two things the container does not have by default: the
+Legacy directory mounted inside it, and a way to reach Legacy's database. That database is usually
+at `localhost` in Legacy's config, and inside a container `localhost` is the container itself.
+Hardlinks also cannot cross into a mount, so `--files=hardlink` quietly becomes a copy. When
+Legacy runs on the same machine's own web server, the bundle route below is simpler and needs
+none of that.
+
+### Legacy on this machine, ProjectSend in Docker
+
+The usual shape of an upgrade: Legacy was copied into a LAMP server, and the new install follows
+[Getting started](README.md#getting-started). Use a bundle. The exporter runs with the PHP your
+Legacy site already uses, on the host, where `localhost` really is Legacy's database. Nothing has
+to reach across into the container except one directory at the end.
+
+Every command below runs from the directory that holds your `compose.yaml`, after the tool is
+installed as described in [Step 1](#if-you-are-running-the-official-docker-image).
+
+**1. Take the exporter out of the container:**
+
+```sh
+docker compose cp \
+    app:/var/www/html/vendor/projectsend/v1-migration-tool/bin/projectsend-v1-export.php .
+```
+
+**2. Export, on the host.** Point `--install` at the directory Legacy runs from, the one that holds
+`includes/sys.config.php`. `--files=copy` puts the files in the bundle too, so this needs free
+disk space about the size of Legacy's `upload/files` directory:
+
+```sh
+php projectsend-v1-export.php --install=/var/www/projectsend-legacy --preflight
+php projectsend-v1-export.php --install=/var/www/projectsend-legacy --out=/srv/ps-export --files=copy
+```
+
+If `php` says it cannot connect to the database, run it as a user who can read Legacy's config and
+use the same `php` your web server uses.
+
+**3. Put the bundle inside the container**, and give it to the user the application runs as:
+
+```sh
+docker compose cp /srv/ps-export app:/tmp/ps-export
+docker compose exec app chown -R www-data:www-data /tmp/ps-export
+```
+
+For a very large install, mount it instead of copying it: add `- /srv/ps-export:/tmp/ps-export:ro`
+under the app service's `volumes:` in `compose.yaml`, and run `docker compose up -d`. Take the line
+out again when you are done.
+
+**4. Carry on from [Step 4](#step-4--read-the-preflight)** with the bundle's path inside the
+container:
+
+```sh
+docker compose exec -u www-data app php artisan projectsend:migrate:preflight --bundle=/tmp/ps-export
+docker compose exec -u www-data app php artisan projectsend:migrate:import --bundle=/tmp/ps-export
+```
+
+When the import is verified, delete `/srv/ps-export` on the host and the copy in the container
+(`docker compose exec app rm -rf /tmp/ps-export`). Your Legacy install is never written to.
 
 ---
 
@@ -356,8 +415,12 @@ Once you are satisfied:
 
 ```sh
 php artisan projectsend:migrate:reset --drop   # also drops the tool's own tables
-composer remove projectsend/v1-migration-tool
+composer remove projectsend/v1-migration-tool --update-no-dev
 ```
+
+Removing a package makes Composer update the rest, so it needs `--update-no-dev` for the same reason
+as installing did. Leave it off only on a git checkout you develop on. On the Docker image, run it
+the way Step 1 ran `require`: `php /tmp/composer.phar remove …` as `www-data`.
 
 `--drop` throws away the Legacy → ProjectSend id map. **Keep it** if you may ever want to redirect
 old `download.php?id=…` links, because it is the only thing that can resolve them. Removing the

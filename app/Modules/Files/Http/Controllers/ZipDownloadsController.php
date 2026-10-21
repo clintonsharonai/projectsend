@@ -13,6 +13,8 @@ use App\Modules\Files\Access\DownloadAllowance;
 use App\Modules\Files\Access\ViewableFileScope;
 use App\Modules\Files\Jobs\BuildZipDownloadJob;
 use App\Modules\Files\Models\File;
+use App\Modules\Files\Scanning\ScanStatus;
+use App\Modules\Files\Scanning\FileAvailability;
 use App\Modules\Files\Models\Folder;
 use App\Modules\Files\Models\ZipDownload;
 use App\Modules\Files\Uploads\StoreUploadedFile;
@@ -45,6 +47,7 @@ class ZipDownloadsController extends Controller
         private readonly ActivityLogger $activity,
         private readonly ViewableFileScope $viewable,
         private readonly DownloadAllowance $allowance,
+        private readonly FileAvailability $availability,
         private readonly Settings $settings,
         private readonly FileDelivery $delivery,
     ) {}
@@ -102,7 +105,11 @@ class ZipDownloadsController extends Controller
         // as many times as they were meant to is the whole point of not
         // hiding exhausted files.
         $selected = $files->count();
-        $files = $files->filter(fn (File $file): bool => $this->allowance->allows($file, $user));
+        // A file still being checked, or quarantined, is left out of the
+        // selection the same way a spent allowance leaves one out: the zip
+        // is bytes leaving the server, and nothing unchecked goes into one.
+        $files = $files->filter(fn (File $file): bool => $this->availability->isAvailable($file)
+            && $this->allowance->allows($file, $user));
 
         abort_if(
             $files->isEmpty() && $folders->isEmpty() && $selected > 0,
@@ -179,6 +186,21 @@ class ZipDownloadsController extends Controller
         abort_unless($user !== null && $zipDownload->requested_by === $user->id, 404);
         $path = $zipDownload->path;
         abort_unless($zipDownload->status === ZipDownload::STATUS_READY && $path !== null, 404);
+
+        // The build left out anything not yet available, but a file can be
+        // quarantined after its archive was built — a rescan with newer
+        // definitions, say. Nothing can be taken out of a finished zip, so
+        // the whole archive is refused and a fresh one leaves the file out.
+        $contained = $zipDownload->contained_file_ids;
+
+        abort_if(
+            $contained !== null && File::query()
+                ->whereIn('id', $contained)
+                ->whereNotIn('scan_status', ScanStatus::availableValues())
+                ->exists(),
+            423,
+            __('A file in this archive is no longer available. Download the selection again.'),
+        );
 
         // Only the first time. Re-fetching one prepared archive is the
         // same delivery, not a fresh download of everything inside it.

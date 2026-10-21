@@ -10,6 +10,7 @@ use App\Modules\Audit\Http\Controllers\DownloadsController;
 use App\Modules\Clients\Http\Controllers\AccountRequestsController;
 use App\Modules\Clients\Http\Controllers\ClientCustomFieldsController;
 use App\Modules\Clients\Http\Controllers\ClientsController;
+use App\Modules\Clients\Http\Controllers\InvitationController;
 use App\Modules\Comments\Http\Controllers\CommentDeepLinkController;
 use App\Modules\Comments\Http\Controllers\CommentsController;
 use App\Modules\Comments\Http\Controllers\FileCommentsController;
@@ -28,6 +29,7 @@ use App\Modules\Files\Http\Controllers\FoldersController;
 use App\Modules\Files\Http\Controllers\MyFilesController;
 use App\Modules\Files\Http\Controllers\MyFoldersController;
 use App\Modules\Files\Http\Controllers\OrphanFilesController;
+use App\Modules\Files\Http\Controllers\QuarantineController;
 use App\Modules\Files\Http\Controllers\PublicShareController;
 use App\Modules\Files\Http\Controllers\ShareLinksController;
 use App\Modules\Files\Http\Controllers\ZipDownloadsController;
@@ -44,10 +46,16 @@ use App\Modules\Identity\Http\Controllers\UsersController;
 use App\Modules\Notifications\Http\Controllers\NotificationsController;
 use App\Modules\Platform\Http\Controllers\LocaleController;
 use App\Modules\Platform\Http\Controllers\TimezoneController;
+use App\Modules\Identity\StartPages;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/', function () {
-    return redirect()->route(auth()->check() ? 'dashboard' : 'login');
+// A signed-in visitor goes where signing in would have sent them — their
+// own start page, their role's, or the dashboard (see StartPages).
+Route::get('/', function (Request $request, StartPages $startPages) {
+    $user = $request->user();
+
+    return $user === null ? redirect()->route('login') : redirect($startPages->pathFor($user));
 })->name('home');
 
 Route::put('locale', [LocaleController::class, 'update'])
@@ -118,8 +126,19 @@ Route::middleware(['auth'])->group(function () {
     Route::middleware(['staff', 'can:import_orphans'])->group(function () {
         Route::get('files/orphans', [OrphanFilesController::class, 'index'])->name('orphan-files.index');
         Route::post('files/orphans/import', [OrphanFilesController::class, 'import'])->name('orphan-files.import');
+        Route::get('files/orphans/import-status', [OrphanFilesController::class, 'importStatus'])->name('orphan-files.import-status');
         Route::post('files/orphans/delete', [OrphanFilesController::class, 'destroy'])->name('orphan-files.delete');
     });
+
+    // Before files/{file}, or "quarantine" is swallowed as a file key —
+    // the same ordering the orphans block above depends on.
+    Route::get('files/quarantine', [QuarantineController::class, 'index'])
+        ->middleware(['staff', 'can:release_quarantined_files'])->name('files.quarantine');
+    // Password confirmation on top of the permission: this is the one
+    // action that deliberately hands out a file the scanner called
+    // malicious, and it is the same bar minting an API token has to clear.
+    Route::post('files/{file}/release', [QuarantineController::class, 'release'])
+        ->middleware(['staff', 'can:release_quarantined_files', 'password.confirm'])->name('files.release');
 
     Route::get('files/{file}', [FilesController::class, 'edit'])->middleware('staff')->name('files.edit');
     Route::get('files/{file}/details', [FileDetailsController::class, 'show'])->middleware('staff')->name('files.details');
@@ -133,6 +152,9 @@ Route::middleware(['auth'])->group(function () {
     Route::patch('files/bulk-edit', [FilesController::class, 'bulkUpdate'])->middleware('staff')->name('files.bulk-update');
     Route::patch('files/{file}', [FilesController::class, 'update'])->middleware('staff')->name('files.update');
     Route::patch('files/{file}/move', [FilesController::class, 'move'])->middleware('staff')->name('files.move');
+    // Before files/{file}, which would otherwise read "bulk-delete" as a
+    // file id and 404.
+    Route::delete('files/bulk-delete', [FilesController::class, 'bulkDestroy'])->middleware('staff')->name('files.bulk-destroy');
     Route::delete('files/{file}', [FilesController::class, 'destroy'])->middleware('staff')->name('files.destroy');
     Route::post('files/{file}/assignments', [FileAssignmentsController::class, 'store'])->middleware('staff')->name('files.assignments.store');
     Route::delete('files/{file}/assignments', [FileAssignmentsController::class, 'destroy'])->middleware('staff')->name('files.assignments.destroy');
@@ -140,8 +162,16 @@ Route::middleware(['auth'])->group(function () {
     Route::get('files/{file}/version-preview', [FileVersionsController::class, 'preview'])->middleware('staff')->name('files.version.preview');
     Route::put('files/{file}/version', [FileVersionsController::class, 'store'])->middleware('staff')->name('files.version.store');
     Route::delete('files/{file}/version', [FileVersionsController::class, 'destroy'])->middleware('staff')->name('files.version.destroy');
-    Route::post('files/{file}/share-links', [ShareLinksController::class, 'store'])->middleware('staff')->name('files.share-links.store');
-    Route::delete('share-links/{shareLink}', [ShareLinksController::class, 'destroy'])->middleware('staff')->name('share-links.destroy');
+    // Not staff-only. A client may publish a file they uploaded, if this
+    // installation gave them `upload_public` — the same key that lets them
+    // mark it public in the first place. Both methods still authorize
+    // `update` on the file, which for a client means their own upload and
+    // nothing else (see FilePolicy). Reported by Ricardo Cazati: a client
+    // could switch a file to public and was then shown no link and given
+    // no way to make one, which is a switch that promises what the screen
+    // cannot deliver.
+    Route::post('files/{file}/share-links', [ShareLinksController::class, 'store'])->name('files.share-links.store');
+    Route::delete('share-links/{shareLink}', [ShareLinksController::class, 'destroy'])->name('share-links.destroy');
 
     // Folders: the shared staff library tree.
     Route::get('folders/{folder}', [FoldersController::class, 'edit'])->middleware('staff')->name('folders.share');
@@ -196,11 +226,18 @@ Route::middleware(['auth'])->group(function () {
     // Named bucket, as every throttle in this app must be: a bare
     // `throttle:` keys on sha1(domain|ip) and would share one counter with
     // every other bare throttle rather than with this route.
-    Route::post('zip-downloads', [ZipDownloadsController::class, 'store'])
-        ->middleware('throttle:10,1,zip-downloads')
-        ->name('zip-downloads.store');
-    Route::get('zip-downloads/{zipDownload}', [ZipDownloadsController::class, 'show'])->name('zip-downloads.show');
-    Route::get('zip-downloads/{zipDownload}/download', [ZipDownloadsController::class, 'download'])->name('zip-downloads.download');
+    //
+    // Behind capability:downloads.zip, all three, so a plan that withholds
+    // zips answers a hand-made request with 404 rather than only hiding
+    // the button. ZipDownloadRoutesGuardTest fails on any zip route that
+    // is missing it.
+    Route::middleware('capability:downloads.zip')->group(function () {
+        Route::post('zip-downloads', [ZipDownloadsController::class, 'store'])
+            ->middleware('throttle:10,1,zip-downloads')
+            ->name('zip-downloads.store');
+        Route::get('zip-downloads/{zipDownload}', [ZipDownloadsController::class, 'show'])->name('zip-downloads.show');
+        Route::get('zip-downloads/{zipDownload}/download', [ZipDownloadsController::class, 'download'])->name('zip-downloads.download');
+    });
 
     // Resumable chunked uploads (Uppy aws-s3 multipart contract). Shared
     // by staff and clients alike — ChunkedUploadsController's only
@@ -273,6 +310,16 @@ Route::middleware(['auth'])->group(function () {
     Route::get('clients', [ClientsController::class, 'index'])->middleware(['staff', 'can:manage_clients'])->name('clients.index');
     Route::get('clients/create', [ClientsController::class, 'create'])->middleware(['staff', 'can:create_clients'])->name('clients.create');
     Route::post('clients', [ClientsController::class, 'store'])->middleware(['staff', 'can:create_clients'])->name('clients.store');
+    // Invite shares create_clients rather than a capability of its own,
+    // same reasoning as the note above: an installation that may add a
+    // client by hand may also ask one to set their own password.
+    // Sending and cancelling are the same authority, and so is reading the
+    // history: whoever may invite somebody may see who has been invited
+    // and take it back.
+    Route::get('clients/invitations', [InvitationController::class, 'index'])->middleware(['staff', 'can:create_clients'])->name('invitations.index');
+    Route::get('clients/invitations/create', [InvitationController::class, 'create'])->middleware(['staff', 'can:create_clients'])->name('invitations.create');
+    Route::post('clients/invitations', [InvitationController::class, 'store'])->middleware(['staff', 'can:create_clients'])->name('invitations.store');
+    Route::delete('clients/invitations/{invitation}', [InvitationController::class, 'destroy'])->middleware(['staff', 'can:create_clients'])->name('invitations.destroy');
     Route::get('clients/{client}/files', [ClientFilesController::class, 'index'])->middleware(['staff', 'can:edit_clients'])->name('clients.files');
     Route::get('clients/{client}', [ClientsController::class, 'edit'])->middleware(['staff', 'can:edit_clients'])->name('clients.edit');
     Route::patch('clients/{client}', [ClientsController::class, 'update'])->middleware(['staff', 'can:edit_clients'])->name('clients.update');

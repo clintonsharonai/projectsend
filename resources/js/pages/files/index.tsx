@@ -1,7 +1,7 @@
 import { type BreadcrumbItem, type SharedData } from '@/types';
 import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
-import { Archive, ChevronRight, ExternalLink, File as FileIcon, Folder as FolderIcon, FolderPlus, Info, Pencil, X } from 'lucide-react';
+import { Archive, ChevronRight, ExternalLink, File as FileIcon, Folder as FolderIcon, FolderPlus, Info, Pencil, Trash2, X } from 'lucide-react';
 import { FormEventHandler, useEffect, useRef, useState } from 'react';
 
 import { BulkEditFilesDialog, type BulkEditPayload } from '@/components/bulk-edit-files-dialog';
@@ -13,6 +13,7 @@ import { DetailsPanel, DetailsTarget } from '@/components/details-panel';
 import { DragChip, DragData, DropZone, useFolderDrop, useRowDrag } from '@/components/file-dnd';
 import { FilePreviewDialog } from '@/components/file-preview-dialog';
 import { PreviewAction } from '@/components/preview-action';
+import { ScanBadge, type ScanState } from '@/components/files/scan-badge';
 import { VersionBadge, type VersionLinks } from '@/components/files/version-badge';
 import Heading from '@/components/heading';
 import { FilterField, ListToolbar } from '@/components/list-toolbar';
@@ -27,6 +28,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ViewModeToggle } from '@/components/view-mode-toggle';
 import { ZipDownloadDialog } from '@/components/zip-download-dialog';
+import { useCapability } from '@/hooks/use-capability';
 import { ALL, useListQuery } from '@/hooks/use-list-query';
 import { useTranslation } from '@/hooks/use-translation';
 import { useViewMode } from '@/hooks/use-view-mode';
@@ -60,6 +62,8 @@ interface FileRow {
     public: boolean;
     public_url: string | null;
     expired: boolean;
+    /** What the virus scanner made of it. Null when scanning is off. */
+    scan: ScanState | null;
     assignments_count: number;
     downloads_count: number;
     /**
@@ -100,6 +104,13 @@ interface FilesIndexProps {
     searching: boolean;
     category: number | null;
     categories: CategoryTag[];
+    uploader: number | null;
+    visibility: 'public' | 'private' | null;
+    downloads: 'none' | 'any' | null;
+    role: number | null;
+    version: 'current' | 'outdated' | null;
+    uploader_options: Crumb[];
+    role_options: Crumb[];
     expired: boolean;
     can_create_folders: boolean;
     can_upload: boolean;
@@ -118,6 +129,13 @@ export default function FilesIndex({
     searching,
     category,
     categories,
+    uploader,
+    visibility,
+    downloads,
+    role,
+    version,
+    uploader_options,
+    role_options,
     expired,
     can_create_folders,
     can_upload,
@@ -135,6 +153,9 @@ export default function FilesIndex({
     const [panelTarget, setPanelTarget] = useState<DetailsTarget | null>(null);
 
     const zip = useZipDownload();
+    // Withheld on some hosted plans. Only the zip buttons go: selection
+    // also drives bulk edit here, so the checkboxes stay.
+    const canZip = useCapability('downloads.zip');
     const [selectedFileIds, setSelectedFileIds] = useState<Set<number>>(new Set());
     const [selectedFolderIds, setSelectedFolderIds] = useState<Set<number>>(new Set());
     const selectionCount = selectedFileIds.size + selectedFolderIds.size;
@@ -145,7 +166,7 @@ export default function FilesIndex({
     useEffect(() => {
         setSelectedFileIds(new Set());
         setSelectedFolderIds(new Set());
-    }, [folder?.id, search, category, expired, pagination.page]);
+    }, [folder?.id, search, category, uploader, visibility, downloads, role, version, expired, pagination.page]);
 
     const toggleFile = (id: number) =>
         setSelectedFileIds((current) => {
@@ -174,12 +195,34 @@ export default function FilesIndex({
             { preserveScroll: true, preserveState: false, onSuccess: () => clearSelection() },
         );
 
+    // Only the selected files this person may delete. The server asks
+    // each one again (FilesController::bulkDestroy); this decides whether
+    // the button shows and what it says.
+    const deletableFileIds = files.filter((file) => selectedFileIds.has(file.id) && file.can_delete).map((file) => file.id);
+
+    const bulkDeleteFiles = () =>
+        router.delete(route('files.bulk-destroy'), {
+            data: { file_ids: deletableFileIds },
+            preserveScroll: true,
+            preserveState: false,
+            onSuccess: () => clearSelection(),
+        });
+
     // A search term or a category filter both switch to a flat, global view,
     // dropping the current folder context.
     const { values, set, reset, hasFilters } = useListQuery(
         'files.index',
-        { search, category: category === null ? ALL : String(category), expired: expired ? 'true' : '' },
-        { search: '', category: ALL, expired: '' },
+        {
+            search,
+            category: category === null ? ALL : String(category),
+            uploader: uploader === null ? ALL : String(uploader),
+            visibility: visibility ?? ALL,
+            downloads: downloads ?? ALL,
+            role: role === null ? ALL : String(role),
+            version: version ?? ALL,
+            expired: expired ? 'true' : '',
+        },
+        { search: '', category: ALL, uploader: ALL, visibility: ALL, downloads: ALL, role: ALL, version: ALL, expired: '' },
     );
 
     // A small drag threshold so clicking action buttons never starts a drag.
@@ -261,7 +304,7 @@ export default function FilesIndex({
                 <div className="flex items-start justify-between">
                     <Heading title={t('Files')} description={t('Your shared file library')} />
                     <div className="flex gap-2">
-                        {folder !== null && !searching && (
+                        {canZip && folder !== null && !searching && (
                             <Button variant="outline" onClick={() => zip.start({ folder_ids: [folder.id] })}>
                                 <Archive className="size-4" />
                                 {t('Download as zip')}
@@ -367,7 +410,10 @@ export default function FilesIndex({
                         )}
                         {can_upload && (
                             <Button asChild>
-                                <Link href={route('files.create')}>{t('Upload')}</Link>
+                                {/* Into the folder on screen, not the top of the
+                                    library (#1801). Not while searching: the
+                                    results span folders, so there is no "here". */}
+                                <Link href={route('files.create', folder !== null && !searching ? { folder: folder.id } : {})}>{t('Upload')}</Link>
                             </Button>
                         )}
                     </div>
@@ -404,6 +450,76 @@ export default function FilesIndex({
                             </Select>
                         </FilterField>
                     )}
+                    {uploader_options.length > 0 && (
+                        <FilterField label={t('Uploaded by')} htmlFor="files-uploader">
+                            <Select value={values.uploader} onValueChange={(v) => set('uploader', v)}>
+                                <SelectTrigger id="files-uploader" className="w-48">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value={ALL}>{t('All users')}</SelectItem>
+                                    {uploader_options.map((u) => (
+                                        <SelectItem key={u.id} value={String(u.id)}>
+                                            {u.name}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </FilterField>
+                    )}
+                    {role_options.length > 0 && (
+                        <FilterField label={t('Uploader role')} htmlFor="files-role">
+                            <Select value={values.role} onValueChange={(v) => set('role', v)}>
+                                <SelectTrigger id="files-role" className="w-48">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value={ALL}>{t('All roles')}</SelectItem>
+                                    {role_options.map((r) => (
+                                        <SelectItem key={r.id} value={String(r.id)}>
+                                            {r.name}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </FilterField>
+                    )}
+                    <FilterField label={t('Visibility')} htmlFor="files-visibility">
+                        <Select value={values.visibility} onValueChange={(v) => set('visibility', v)}>
+                            <SelectTrigger id="files-visibility" className="w-40">
+                                <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value={ALL}>{t('All files')}</SelectItem>
+                                <SelectItem value="public">{t('Public')}</SelectItem>
+                                <SelectItem value="private">{t('Private')}</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </FilterField>
+                    <FilterField label={t('Downloads')} htmlFor="files-downloads">
+                        <Select value={values.downloads} onValueChange={(v) => set('downloads', v)}>
+                            <SelectTrigger id="files-downloads" className="w-48">
+                                <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value={ALL}>{t('Any number of downloads')}</SelectItem>
+                                <SelectItem value="none">{t('Never downloaded')}</SelectItem>
+                                <SelectItem value="any">{t('Downloaded at least once')}</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </FilterField>
+                    <FilterField label={t('Version')} htmlFor="files-version">
+                        <Select value={values.version} onValueChange={(v) => set('version', v)}>
+                            <SelectTrigger id="files-version" className="w-44">
+                                <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value={ALL}>{t('All versions')}</SelectItem>
+                                <SelectItem value="current">{t('Current version')}</SelectItem>
+                                <SelectItem value="outdated">{t('Outdated')}</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </FilterField>
                     <FilterField label={t('Expired')} htmlFor="files-expired">
                         <div className="flex h-9 items-center gap-2">
                             <Checkbox
@@ -453,10 +569,12 @@ export default function FilesIndex({
                         <div className="bg-muted/40 mb-3 flex items-center justify-between gap-3 rounded-lg border px-4 py-2">
                             <p className="text-sm font-medium">{t(':count selected', { count: selectionCount })}</p>
                             <div className="flex items-center gap-2">
-                                <Button size="sm" onClick={downloadSelectionAsZip}>
-                                    <Archive className="size-4" />
-                                    {t('Download as zip')}
-                                </Button>
+                                {canZip && (
+                                    <Button size="sm" onClick={downloadSelectionAsZip}>
+                                        <Archive className="size-4" />
+                                        {t('Download as zip')}
+                                    </Button>
+                                )}
                                 {selectedFileIds.size === 0 ? (
                                     <TooltipProvider delayDuration={0}>
                                         <Tooltip>
@@ -486,6 +604,26 @@ export default function FilesIndex({
                                         canSetExpiration={canSetExpiration}
                                         canLimitDownloads={canLimitDownloads}
                                         onConfirm={bulkEditFiles}
+                                    />
+                                )}
+                                {deletableFileIds.length > 0 && (
+                                    <ConfirmDialog
+                                        trigger={
+                                            <Button size="sm" variant="outline" className="text-destructive hover:text-destructive">
+                                                <Trash2 className="size-4" />
+                                                {t('Delete')}
+                                            </Button>
+                                        }
+                                        title={t('Delete the selected files?')}
+                                        description={
+                                            deletableFileIds.length === selectedFileIds.size
+                                                ? t('They will no longer be available to anyone they were shared with.')
+                                                : t(
+                                                      'Only the files you are allowed to delete are removed. They will no longer be available to anyone they were shared with.',
+                                                  )
+                                        }
+                                        confirmLabel={t('Delete')}
+                                        onConfirm={bulkDeleteFiles}
                                     />
                                 )}
                                 <Button variant="ghost" size="sm" onClick={clearSelection}>
@@ -718,6 +856,7 @@ function FileRow({
                                     {t('Expired')}
                                 </Badge>
                             )}
+                            <ScanBadge scan={row.scan} />
                             <VersionBadge version={row.version} />
                         </div>
                         <p className="text-muted-foreground text-xs">
@@ -960,6 +1099,7 @@ function FileCard({
                             {t('Expired')}
                         </Badge>
                     )}
+                    <ScanBadge scan={row.scan} />
                     <VersionBadge version={row.version} />
                 </div>
                 <p className="text-muted-foreground truncate text-xs">

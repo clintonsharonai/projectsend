@@ -13,6 +13,8 @@ use App\Modules\Files\Delivery\FileDelivery;
 use App\Modules\Files\Delivery\StoredFileResponse;
 use App\Modules\Files\Models\Category;
 use App\Modules\Files\Models\File;
+use App\Modules\Files\Scanning\FileAvailability;
+use App\Modules\Files\Scanning\ScanningConfig;
 use App\Modules\Files\Models\Folder;
 use App\Modules\Files\Preview\PreviewKind;
 use App\Modules\Files\Preview\PreviewLog;
@@ -81,6 +83,7 @@ class PublicGroupsController extends Controller
         private readonly ActivityLogger $activity,
         private readonly PreviewLog $previews,
         private readonly DownloadAllowance $allowance,
+        private readonly FileAvailability $availability,
         private readonly ThumbnailGenerator $thumbnails,
         private readonly PublicThemeRegistry $themes,
         private readonly CapabilityRegistry $capabilities,
@@ -191,7 +194,8 @@ class PublicGroupsController extends Controller
     {
         $this->guardSlug($publicSlug);
 
-        abort_unless($file->isEffectivelyPublic() && ! $file->isExpired(), 404);
+        abort_unless($file->isEffectivelyPublic() && ! $file->isExpired() && ! $file->isWithdrawn(), 404);
+        abort_unless($this->availability->isAvailable($file), 404);
 
         $file->loadMissing('categories');
 
@@ -225,6 +229,9 @@ class PublicGroupsController extends Controller
             // is allowed.
             'preview_url' => $this->previewUrlFor($file, $publicSlug),
             'download_url' => route('public.download', [$publicSlug, $file->slug]),
+            // See PublicShareController::show — the same sentence, to the
+            // same person, on the other public surface.
+            'unscanned' => app(ScanningConfig::class)->enabled() && $file->wasLetThrough(),
             // Same decided shape the listings send, so a theme's single
             // file page disables its button for the same reason a row
             // does — see DownloadAllowance::summaryFor.
@@ -242,7 +249,8 @@ class PublicGroupsController extends Controller
     {
         $this->guardSlug($publicSlug);
 
-        abort_unless($file->isEffectivelyPublic() && ! $file->isExpired(), 404);
+        abort_unless($file->isEffectivelyPublic() && ! $file->isExpired() && ! $file->isWithdrawn(), 404);
+        abort_unless($this->availability->isAvailable($file), 404);
         abort_unless(ThumbnailGenerator::supports($file->mime_type), 404);
 
         // Always the external variant — nobody reaching a public listing is
@@ -299,7 +307,8 @@ class PublicGroupsController extends Controller
     {
         $this->guardSlug($publicSlug);
 
-        abort_unless($file->isEffectivelyPublic() && ! $file->isExpired(), 404);
+        abort_unless($file->isEffectivelyPublic() && ! $file->isExpired() && ! $file->isWithdrawn(), 404);
+        abort_unless($this->availability->isAvailable($file), 404);
         abort_unless($this->settings->get(Setting::PublicListingPreviewEnabled) === true, 404);
         abort_if(PreviewKind::forMime($file->mime_type) === null, 404);
 
@@ -345,7 +354,8 @@ class PublicGroupsController extends Controller
     {
         $this->guardSlug($publicSlug);
 
-        abort_unless($file->isEffectivelyPublic() && ! $file->isExpired(), 404);
+        abort_unless($file->isEffectivelyPublic() && ! $file->isExpired() && ! $file->isWithdrawn(), 404);
+        abort_unless($this->availability->isAvailable($file), 404);
 
         // 403 rather than 404, unlike the checks above it: the file is
         // genuinely here and genuinely public, it has simply been taken

@@ -8,8 +8,11 @@ use App\Models\User;
 use App\Modules\Files\Access\DownloadAllowance;
 use App\Modules\Files\Access\ViewableFileScope;
 use App\Modules\Files\Models\File;
+use App\Modules\Files\Scanning\FileAvailability;
 use App\Modules\Files\Models\Folder;
 use App\Modules\Files\Models\ZipDownload;
+use App\Modules\Platform\Capabilities\Capability;
+use App\Modules\Platform\Capabilities\CapabilityRegistry;
 use App\Modules\Platform\Settings\Setting;
 use App\Modules\Platform\Settings\Settings;
 use Illuminate\Bus\Queueable;
@@ -86,6 +89,23 @@ class BuildZipDownloadJob implements ShouldQueue
             return;
         }
 
+        // A build queued before this installation was told to stop
+        // offering zips. The route refuses new ones; this refuses the ones
+        // already waiting, so the work the key exists to save is not done
+        // anyway. Checked before started_at is stamped, so the row goes
+        // straight from waiting to failed and never looks like a build in
+        // hand. Failed, not left pending: pending is polled by the page
+        // and counted by StalledZipBuilds, and neither should wait on a
+        // build that will never run.
+        if (! app(CapabilityRegistry::class)->has(Capability::ZipDownloads)) {
+            $zipDownload->update([
+                'status' => ZipDownload::STATUS_FAILED,
+                'error' => 'Zip downloads are not available on this site.',
+            ]);
+
+            return;
+        }
+
         // Stamped before any of the work, because the only thing this is
         // for is telling "a worker has this in hand" apart from "nobody
         // is listening to the zips queue". A build that waits and never
@@ -114,6 +134,7 @@ class BuildZipDownloadJob implements ShouldQueue
 
         $visible = app(ViewableFileScope::class)->for($requester);
         $allowance = app(DownloadAllowance::class);
+        $availability = app(FileAvailability::class);
 
         try {
             $relativePath = 'zips/'.$zipDownload->id.'.zip';
@@ -148,7 +169,11 @@ class BuildZipDownloadJob implements ShouldQueue
                 // Re-checked here for the same reason visibility is: the
                 // archive is built some time after it was asked for, and
                 // the allowance may have been spent in between.
-                if (! $allowance->allows($file, $requester)) {
+                // Availability is re-checked here for a sharper reason
+                // than the allowance is: a file can be quarantined between
+                // the request and the build, and an archive is exactly how
+                // an infected file would leave anyway.
+                if (! $availability->isAvailable($file) || ! $allowance->allows($file, $requester)) {
                     $skipped[] = ['id' => $file->id, 'name' => $file->name];
 
                     continue;
@@ -382,6 +407,7 @@ class BuildZipDownloadJob implements ShouldQueue
     private function addFolder(ZipArchive $zip, Folder $folder, User $requester, array &$usedNames, array &$tempFiles, Builder $visible, array &$skipped, array &$added): int
     {
         $allowance = app(DownloadAllowance::class);
+        $availability = app(FileAvailability::class);
 
         $subtreeIds = $folder->subtreeFolderIds();
         /** @var Collection<int, Folder> $foldersById */
@@ -403,7 +429,7 @@ class BuildZipDownloadJob implements ShouldQueue
             // inside it whose own allowance is spent — same reason the
             // per-file visibility filter is re-derived rather than
             // inherited from the folder.
-            if (! $allowance->allows($file, $requester)) {
+            if (! $availability->isAvailable($file) || ! $allowance->allows($file, $requester)) {
                 $skipped[] = ['id' => $file->id, 'name' => $file->name];
 
                 continue;

@@ -218,7 +218,7 @@ its own directory the first time it starts.
 
 ### 2. Point the compose file at them
 
-`compose.example.yaml` is yours — you downloaded and edited it — so change the volumes in place
+Your `compose.yaml` is yours — you downloaded and edited it — so change the volumes in place
 rather than layering an override on top:
 
 ```yaml
@@ -361,6 +361,33 @@ docker compose up -d
 restored is a hypothesis, not a backup.
 
 ---
+
+## Virus scanning
+
+Uploads can be checked before anybody can download them. The scanner is an extra container, off
+unless you ask for it:
+
+```sh
+docker compose --profile scanner up -d
+```
+
+Then go to **System → Settings → Virus scanning**, switch it on, and use `tcp://clamav:3310` as the
+address. On a brand-new installation you can skip that step: uncomment
+`PROJECTSEND_SCANNER_DEFAULT_ADDRESS` in the compose file before the first start and the site comes
+up already pointed at the scanner. It is a starting value, not a lock — the address and the switch
+stay on that screen. **Test scanner** sends EICAR, a harmless file made only for testing that every antivirus
+recognises, and tells you whether it was actually detected. It also sends a password-protected zip, and fails if the scanner calls it clean.
+
+The compose file gives the scanner the settings ProjectSend needs, in the `configs` section at the
+bottom. Keep them if you change that file. On its own defaults ClamAV reports an archive it cannot
+open as clean, so a password-protected zip would get through unchecked.
+
+Two things to know before you turn it on. It needs about **1–1.5 GB of memory**, because the virus
+definitions are held in memory. And the first start downloads those definitions, which takes a few
+minutes — until it finishes, the scanner does not answer, and the Test button says so.
+
+The scanner is reachable only from the application's own network. That is deliberate: ClamAV has no
+password of any kind, so anything that can reach it can use it.
 
 ## Upgrading
 

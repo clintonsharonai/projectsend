@@ -10,6 +10,7 @@ use App\Modules\Audit\Action;
 use App\Modules\Audit\ActivityLogger;
 use App\Modules\Clients\ClientStorageUsage;
 use App\Modules\Files\Models\File;
+use App\Modules\Files\Folders\ClientHomeFolders;
 use App\Modules\Files\Models\Folder;
 use App\Modules\Files\Notifications\AdminClientUploadedNotification;
 use App\Modules\Files\Uploads\LocalPartStore;
@@ -57,6 +58,7 @@ class ChunkedUploadsController extends Controller
         private readonly Notifier $notifier,
         private readonly PermissionChecker $permissions,
         private readonly ActivityLogger $activity,
+        private readonly ClientHomeFolders $homeFolders,
         private readonly FileVersions $versions,
     ) {}
 
@@ -90,6 +92,19 @@ class ChunkedUploadsController extends Controller
         assert($user !== null);
 
         $folder = isset($validated['folder_id']) ? Folder::query()->whereKey($validated['folder_id'])->first() : null;
+
+        // A client uploading without naming a folder lands in their own,
+        // where this installation gives them one. That is what makes the
+        // home a root rather than just another folder: nothing in the
+        // portal has to be told about it for their files to end up there.
+        //
+        // Only when no folder was named. A client who picked a destination
+        // picked it, and uploadableBy() below is still what decides whether
+        // they may -- this chooses a default, it never grants anything.
+        if ($folder === null) {
+            $folder = $this->homeFolders->for($user);
+        }
+
         abort_unless(Folder::uploadableBy($user, $folder), 403);
 
         // One session per file, and a person uploads a handful at a time.
@@ -220,7 +235,10 @@ class ChunkedUploadsController extends Controller
         // chooses its own chunking and only the last part is short.
         $limit = $maxPartBytes * 2;
 
-        if ($request->header('Content-Length') !== null && (int) $request->header('Content-Length') > $limit) {
+        $contentLength = $request->header('Content-Length');
+        $reservationLimit = $contentLength !== null ? (int) $contentLength : $limit;
+
+        if ($reservationLimit < 1 || $reservationLimit > $limit) {
             abort(413);
         }
 
@@ -239,7 +257,12 @@ class ChunkedUploadsController extends Controller
         // what a part gets is whatever the session has left, and the write
         // is then capped at exactly that — an over-long body is cut off
         // mid-stream as it always was, just against a smaller number.
-        $reserve = $this->reservePartRoom($session, $part, $limit);
+        // Reserve the declared request length when available. Reserving the
+        // full per-part ceiling (40 MiB for a normal 20 MiB chunk) makes
+        // concurrent final parts exhaust the session allowance prematurely.
+        // Unknown-length requests retain the conservative ceiling, and the
+        // streamed byte count is still enforced against the reservation.
+        $reserve = $this->reservePartRoom($session, $part, $reservationLimit);
 
         if ($reserve < 1) {
             // 413 rather than 422: this is about the size of what is being
@@ -249,9 +272,10 @@ class ChunkedUploadsController extends Controller
             abort(413);
         }
 
-        $stream = $request->getContent(true);
+        $stream = null;
 
         try {
+            $stream = $request->getContent(true);
             $etag = $this->parts->storePart($session, $part, $stream, $reserve);
         } catch (PartTooLargeException) {
             abort(413);

@@ -62,7 +62,22 @@ class FilesController extends Controller
         $user = $request->user();
         assert($user !== null);
 
+        // Opened from inside a folder, the upload goes into it (#1801).
+        // The same two checks the portal's upload page makes, with the
+        // staff library in place of the client's: a folder this person
+        // cannot see is a 404, one they may not upload into is a 403.
+        // ChunkedUploadsController checks the destination again when the
+        // upload starts, so this decides what the page offers, not what
+        // is allowed.
+        $folder = null;
+        if ($request->integer('folder') > 0) {
+            $folder = Folder::query()->find($request->integer('folder'));
+            abort_if($folder === null || ! app(StaffLibraryScope::class)->allowsFolder($user, $folder), 404);
+            abort_unless(Folder::uploadableBy($user, $folder), 403);
+        }
+
         return Inertia::render('files/create', [
+            'folder' => $folder === null ? null : ['id' => $folder->id, 'name' => $folder->name],
             'max_file_size_mb' => app(Settings::class)->get(Setting::MaxFileSizeMb),
             'part_size_mb' => (int) config('projectsend.upload_part_size_mb'),
             'allowed_extensions' => app(UploadExtensionPolicy::class)->hintFor($user),
@@ -177,6 +192,18 @@ class FilesController extends Controller
                 // 12th reopens showing the 11th.
                 'expires_at' => $this->expiry->asShown($file, $request->user()),
                 'expired' => $file->isExpired(),
+                // Said on the one screen that still shows a quarantined or
+                // missing file, since the library no longer lists it: a
+                // staff member who followed a link from Quarantine should
+                // not have to work out why the download refuses.
+                'scan_status' => $file->scan_status->value,
+                'scan_note' => $file->scan_note,
+                // Decided here rather than by the page comparing six
+                // states: whether there are bytes to hand over at all.
+                // Every button that would produce them is hidden when
+                // there are not — a download that answers 423 is not an
+                // affordance, it is a trap.
+                'scan_available' => $file->scan_status->isAvailable(),
                 'download_limit' => $file->download_limit,
                 'download_limit_scope' => ($file->download_limit_scope ?? DownloadLimitScope::Total)->value,
                 // The file's total downloads, so the editor can see what
@@ -267,7 +294,7 @@ class FilesController extends Controller
             'slug' => Rules::slug('files', $file->id),
             'categories' => ['array'],
             'categories.*' => ['integer', 'exists:categories,id'],
-            'expires_at' => ['nullable', 'date'],
+            'expires_at' => ['nullable', 'string', 'date'],
             'download_limit' => ['nullable', 'integer', 'min:1'],
             'download_limit_scope' => ['nullable', Rule::enum(DownloadLimitScope::class)],
         ]);
@@ -393,7 +420,7 @@ class FilesController extends Controller
             'description' => ['nullable', 'string', 'max:2000'],
 
             'expiration_action' => ['required', Rule::in(['no_change', 'set', 'clear'])],
-            'expires_at' => ['nullable', 'date', 'required_if:expiration_action,set'],
+            'expires_at' => ['nullable', 'string', 'date', 'required_if:expiration_action,set'],
 
             // `sometimes` rather than `required` like the fields above:
             // a browser still running the previous build would start
@@ -542,5 +569,42 @@ class FilesController extends Controller
         $this->activity->log(Action::FileDeleted, context: ['name' => $name]);
 
         return redirect()->route('files.index')->with('success', __('File deleted.'));
+    }
+
+    /**
+     * Delete several files at once, from the staff selection bar (#1800).
+     *
+     * Each file is asked exactly what destroy() asks, through the same
+     * policy, and gets the same soft delete and the same activity entry: a
+     * batch is a shorthand for single deletes, never a way around one. A
+     * file the person may not delete is dropped from the batch rather than
+     * failing it, the convention bulkUpdate() follows. Nothing left to
+     * delete is a 422, so the page does not report a success.
+     */
+    public function bulkDestroy(Request $request): RedirectResponse
+    {
+        $user = $request->user();
+        assert($user !== null);
+
+        $validated = $request->validate([
+            'file_ids' => ['required', 'array', 'min:1'],
+            'file_ids.*' => ['integer', 'distinct'],
+        ]);
+
+        $files = File::query()->whereIn('id', $validated['file_ids'])->get()
+            ->filter(fn (File $file): bool => Gate::forUser($user)->allows('delete', $file));
+
+        abort_if($files->isEmpty(), 422, __('None of the selected files could be deleted.'));
+
+        DB::transaction(function () use ($files): void {
+            foreach ($files as $file) {
+                $name = $file->name;
+                $file->delete();
+
+                $this->activity->log(Action::FileDeleted, context: ['name' => $name]);
+            }
+        });
+
+        return back()->with('success', trans_choice(':count file deleted.|:count files deleted.', $files->count(), ['count' => $files->count()]));
     }
 }

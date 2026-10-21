@@ -30,6 +30,12 @@ enum Setting: string
     // Days a denied membership request blocks re-requesting (0 = none).
     case ClientsMembershipDenyCooldownDays = 'clients_membership_deny_cooldown_days';
 
+    // How long a staff-sent client invitation link stays valid before the
+    // invited address has to ask for a new one. Consumed by
+    // InvitationController and InvitationRedemptionController, wherever a
+    // fresh Invitation is issued.
+    case ClientInvitationExpiryHours = 'client_invitation_expiry_hours';
+
     // Whether the client portal offers inline preview at all — the whole
     // affordance, images included, not just the media types. Staff are
     // never gated by it: it exists so an installation can decide that a
@@ -37,6 +43,22 @@ enum Setting: string
     // the tool away from the people who administer the library. See
     // PreviewKind and FileThumbnailController::preview.
     case ClientsCanPreviewFiles = 'clients_can_preview_files';
+
+    // Give every new client a folder of their own, named after them, and
+    // treat it as their root: their uploads and the folders they create
+    // land inside it instead of at the top of the library. What the
+    // administrator gets out of it is a /files that reads as one folder
+    // per client rather than a flat pile.
+    //
+    // It is NOT a boundary. A folder staff share with a client is still
+    // theirs to see, alongside their own -- making the home a jail would
+    // silently break every share that already exists. See ClientHomeFolders.
+    //
+    // Off by default, and turning it on changes nothing that already
+    // exists: existing clients get a home only when an administrator asks
+    // for one, with the button beside the switch. A setting that quietly
+    // reorganised a library on save would be one nobody could try.
+    case ClientsHomeFolders = 'clients_home_folders';
 
     // Maximum upload size in MB (0 = unlimited).
     case MaxFileSizeMb = 'max_file_size_mb';
@@ -155,6 +177,22 @@ enum Setting: string
     // instead, so content is never left orphaned.
     case AccountErasureReassignTo = 'account_erasure_reassign_to';
 
+    // When somebody deletes their own account, whether the files they
+    // uploaded go at once ('immediately') or wait for the grace period
+    // like the account does ('after_grace_period'). Only the self-service
+    // delete asks it: an administrator deleting an account already
+    // chooses per account. Read through SelfDeletion, which a hosted
+    // platform can overrule — never read it directly.
+    case AccountSelfDeleteFiles = 'account_self_delete_files';
+
+    // Whose self-deletion the two rules apply to: 'any' account, or
+    // 'clients' only. The rules are this setting's neighbour above, and
+    // that a self-deleted account's files stop being served to anybody
+    // but staff while the grace period runs. A staff member's uploads are
+    // often the organization's work for its clients, which is the case
+    // for narrowing it. Consumed by SelfDeletion.
+    case AccountSelfDeleteScope = 'account_self_delete_scope';
+
     // Whether PurgeExpiredFilesCommand's daily run actually deletes
     // anything (off by default — deletion is destructive, so an admin
     // must opt in) and how many days after a file's own expires_at it
@@ -169,6 +207,27 @@ enum Setting: string
     // of this stored value — whenever external storage is active; this
     // feature only ever operates on the local disk (see
     // PurgeOrphanFilesCommand and FileRetentionSettingsController).
+    // Virus scanning — see docs/feature-virus-scanning.md and
+    // App\Modules\Files\Scanning\ScanningConfig, which is what reads
+    // these (the address and the on/off switch can both be overruled by a
+    // managed configuration in the environment).
+    case VirusScanningEnabled = 'virus_scanning_enabled';
+    case VirusScannerAddress = 'virus_scanner_address';
+    case VirusScanMaxSizeMb = 'virus_scan_max_size_mb';
+    // 'allow' or 'block' — what happens to a file the scanner cannot open
+    // (too large, or encrypted). Allowing marks it "not scanned" rather
+    // than calling it clean.
+    case VirusUnscannablePolicy = 'virus_unscannable_policy';
+    // 'allow' or 'hold' — what happens to new uploads while the scanner
+    // is unreachable.
+    case VirusScannerDownPolicy = 'virus_scanner_down_policy';
+    // How long a file waits for an unreachable scanner before the policy
+    // above is applied.
+    case VirusScannerWaitMinutes = 'virus_scanner_wait_minutes';
+    // How fast "Scan existing files" works through a library that was
+    // uploaded before scanning was switched on.
+    case VirusScanExistingRatePerMinute = 'virus_scan_existing_rate_per_minute';
+
     case OrphanFilesAutoDeleteEnabled = 'orphan_files_auto_delete_enabled';
     case OrphanFilesDeleteAfterDays = 'orphan_files_delete_after_days';
 
@@ -347,6 +406,9 @@ enum Setting: string
             self::ClientsCanSelectGroup,
             self::TwoFactorEnforcement,
             self::UploadTypeRestriction,
+            self::VirusScannerAddress,
+            self::VirusUnscannablePolicy,
+            self::VirusScannerDownPolicy,
             self::DownloadIpLogging,
             self::CommentsScope,
             self::CommentsAuthors,
@@ -368,10 +430,13 @@ enum Setting: string
             self::NewsLastFetchedAt,
             self::CaptchaProvider,
             self::CaptchaKeySource,
-            self::AccountErasureContentAction => SettingType::String,
+            self::AccountErasureContentAction,
+            self::AccountSelfDeleteFiles,
+            self::AccountSelfDeleteScope => SettingType::String,
 
             self::ClientsCanRegister,
             self::ClientsAutoApprove,
+            self::ClientsHomeFolders,
             self::EmailNotificationsEnabled,
             self::DiscourageSearchIndexing,
             self::PublicListingEnabled,
@@ -388,10 +453,12 @@ enum Setting: string
             self::CaptchaOnPasswordReset,
             self::CaptchaOnPublicComments,
             self::PasswordRejectBreached,
+            self::VirusScanningEnabled,
             self::GettingStartedPending => SettingType::Boolean,
 
             self::ClientsAutoGroup,
             self::ClientsMembershipDenyCooldownDays,
+            self::ClientInvitationExpiryHours,
             self::MaxFileSizeMb,
             self::MaxZipDownloadSizeMb,
             self::DefaultClientStorageQuotaMb,
@@ -403,6 +470,9 @@ enum Setting: string
             self::ExpiredFilesDeleteAfterDays,
             self::CommentsEditWindowMinutes,
             self::OrphanFilesDeleteAfterDays,
+            self::VirusScanMaxSizeMb,
+            self::VirusScannerWaitMinutes,
+            self::VirusScanExistingRatePerMinute,
             self::PasswordMinLength => SettingType::Integer,
 
             self::AdminNotificationEmails,
@@ -442,7 +512,14 @@ enum Setting: string
             self::PublicListingEnabled,
             self::ExpiredFilesAutoDeleteEnabled,
             self::PublicCommentsEnabled,
+            // Off until somebody points it at a scanner, or a managed
+            // configuration names one — see ScanningConfig.
+            self::VirusScanningEnabled,
             self::OrphanFilesAutoDeleteEnabled => false,
+            // Off, because switching it on is a change to how a library is
+            // laid out and that should be somebody's decision rather than
+            // something an upgrade did to them overnight.
+            self::ClientsHomeFolders => false,
 
             self::CheckForUpdates,
             self::FetchNews,
@@ -462,6 +539,7 @@ enum Setting: string
 
             self::ClientsAutoGroup => 0,
             self::ClientsMembershipDenyCooldownDays => 30,
+            self::ClientInvitationExpiryHours => 72,
             self::MaxFileSizeMb => 2048,
             self::MaxZipDownloadSizeMb => 2048,
             self::DefaultClientStorageQuotaMb => 0,
@@ -473,6 +551,22 @@ enum Setting: string
             self::ExpiredFilesDeleteAfterDays => 30,
             self::OrphanFilesDeleteAfterDays => 30,
             self::CommentsEditWindowMinutes => 15,
+
+            // Large enough for ordinary documents and archives, small
+            // enough that one upload does not hold the scanner for
+            // minutes. Must stay under clamd's own StreamMaxLength.
+            self::VirusScanMaxSizeMb => 512,
+            self::VirusScannerWaitMinutes => 10,
+            self::VirusScanExistingRatePerMinute => 60,
+
+            // Both of these let files through, which is the product
+            // owner's decision (2026-09-14): a scanner that cannot answer
+            // must not stop people working. What pays for it is
+            // visibility — every file allowed through this way is marked
+            // "not scanned", and the dashboard and projectsend:status both
+            // say so while it is happening.
+            self::VirusUnscannablePolicy,
+            self::VirusScannerDownPolicy => 'allow',
 
             self::AdminNotificationEmails => [],
 
@@ -487,12 +581,20 @@ enum Setting: string
             // uploaded is the sensible zero-config default; reassign is opt-in
             // and needs a fallback account chosen.
             self::AccountErasureContentAction => 'cascade_delete',
+            // What self-deletion did before the choice existed, so an
+            // upgrade changes nothing about when files are deleted.
+            self::AccountSelfDeleteFiles => 'after_grace_period',
+            self::AccountSelfDeleteScope => 'any',
             // Commenting is on for every file out of the box, but only
             // between people who are logged in: reaching the public
             // requires PublicCommentsEnabled, which is off by default.
             self::CommentsScope => 'all',
             self::CommentsAuthors => 'staff_and_clients',
             self::PublicListingSlug => 'public',
+            // Empty means no scanner configured here. A managed
+            // configuration in the environment beats this when present —
+            // ScanningConfig, not this default, is what a caller asks.
+            self::VirusScannerAddress => '',
             self::DefaultLocale => '',
             self::Timezone => '',
             self::Theme => 'default',

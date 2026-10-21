@@ -2,6 +2,7 @@ import { type BreadcrumbItem, type SharedData } from '@/types';
 import { Head, useForm, usePage } from '@inertiajs/react';
 import { FormEventHandler, useEffect, useRef, useState } from 'react';
 
+import LogoCropDialog, { type LogoCropBox } from '@/components/branding/logo-crop-dialog';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
@@ -22,14 +23,18 @@ interface Watermark {
 
 interface BrandingEditProps {
     logo_url: string | null;
+    logo_source_url: string | null;
+    logo_crop: LogoCropBox | null;
+    logo_cropped: boolean;
     hide_attribution: boolean;
+    show_site_name: boolean;
     watermark: Watermark;
     watermark_positions: string[];
 }
 
 type Tab = 'logo' | 'watermark' | 'attribution';
 
-export default function BrandingEdit({ logo_url, hide_attribution, watermark, watermark_positions }: BrandingEditProps) {
+export default function BrandingEdit({ logo_url, logo_source_url, logo_crop, logo_cropped, hide_attribution, show_site_name, watermark, watermark_positions }: BrandingEditProps) {
     const { t } = useTranslation();
     const { capabilities } = usePage<SharedData>().props;
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -68,6 +73,13 @@ export default function BrandingEdit({ logo_url, hide_attribution, watermark, wa
     const removeWatermarkForm = useForm({});
 
     const attributionForm = useForm({ hide_attribution });
+
+    const siteNameForm = useForm({ show_site_name });
+
+    const submitSiteName: FormEventHandler = (e) => {
+        e.preventDefault();
+        siteNameForm.patch(route('branding.site-name.update'), { preserveScroll: true });
+    };
 
     // Debounced so dragging a number field is one request when it settles
     // rather than one per keystroke — each costs a real GD render on the
@@ -125,6 +137,14 @@ export default function BrandingEdit({ logo_url, hide_attribution, watermark, wa
 
     const remove = () => {
         removeForm.delete(route('branding.destroy'), { preserveScroll: true, preserveState: true });
+    };
+
+    // Cropping is optional: an upload is used whole until somebody crops it.
+    const [cropping, setCropping] = useState(false);
+    const restoreForm = useForm({});
+
+    const restore = () => {
+        restoreForm.delete(route('branding.logo.restore'), { preserveScroll: true, preserveState: true });
     };
 
     const submitWatermark: FormEventHandler = (e) => {
@@ -195,17 +215,66 @@ export default function BrandingEdit({ logo_url, hide_attribution, watermark, wa
                                 accept="image/*"
                                 onChange={(e) => uploadForm.setData('logo', e.target.files?.[0] ?? null)}
                             />
+                            <p className="text-muted-foreground text-sm">
+                                {t('Shown up to 320 × 128 pixels, so a wide logo and a square one both fit. PNG, JPG, GIF or WebP, up to 2 MB.')}
+                            </p>
                             <InputError message={uploadForm.errors.logo} />
                             <Button type="submit" disabled={uploadForm.processing || uploadForm.data.logo === null}>
                                 {t('Upload logo')}
                             </Button>
                         </form>
 
-                        {logo_url && (
-                            <Button variant="outline" onClick={remove} disabled={removeForm.processing}>
-                                {t('Remove logo')}
-                            </Button>
+                        {logo_url && logo_source_url && (
+                            <div className="flex flex-wrap items-center gap-2">
+                                <Button variant="outline" onClick={() => setCropping(true)}>
+                                    {t('Crop')}
+                                </Button>
+                                {logo_cropped && (
+                                    <Button variant="outline" onClick={restore} disabled={restoreForm.processing}>
+                                        {t('Restore original')}
+                                    </Button>
+                                )}
+                                <Button variant="outline" onClick={remove} disabled={removeForm.processing}>
+                                    {t('Remove logo')}
+                                </Button>
+                            </div>
                         )}
+
+                        {logo_source_url && (
+                            // Keyed by the upload so a new logo opens on a fresh box.
+                            <LogoCropDialog
+                                key={logo_source_url}
+                                open={cropping}
+                                onOpenChange={setCropping}
+                                sourceUrl={logo_source_url}
+                                savedCrop={logo_crop}
+                            />
+                        )}
+
+                        <form onSubmit={submitSiteName} className="space-y-4 border-t pt-6">
+                            <div className="flex items-start gap-3">
+                                <Checkbox
+                                    id="show_site_name"
+                                    checked={siteNameForm.data.show_site_name}
+                                    onCheckedChange={(checked) => siteNameForm.setData('show_site_name', checked === true)}
+                                />
+                                <div className="grid gap-1">
+                                    <Label htmlFor="show_site_name">{t('Show the site name under the logo')}</Label>
+                                    <p className="text-muted-foreground text-sm">
+                                        {t('On the sign-in and download pages. Leave it off if your logo already says the name.')}
+                                    </p>
+                                </div>
+                            </div>
+                            <InputError message={siteNameForm.errors.show_site_name} />
+
+                            <div className="flex items-center gap-3">
+                                <Button type="submit" disabled={siteNameForm.processing}>
+                                    {t('Save')}
+                                </Button>
+
+                                {siteNameForm.recentlySuccessful && <p className="text-muted-foreground text-sm">{t('Saved.')}</p>}
+                            </div>
+                        </form>
                     </section>
 
                     {/* Both panels stay mounted and the inactive one is just

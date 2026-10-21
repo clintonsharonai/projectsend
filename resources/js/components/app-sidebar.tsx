@@ -5,29 +5,7 @@ import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu, Sid
 import { useTranslation } from '@/hooks/use-translation';
 import { type NavGroup, type SharedData } from '@/types';
 import { Link, usePage } from '@inertiajs/react';
-import {
-    Activity,
-    ArrowLeftRight,
-    BookOpen,
-    Boxes,
-    Contact,
-    Download,
-    FileCode,
-    FileText,
-    FileWarning,
-    History,
-    KeyRound,
-    LayoutGrid,
-    ListChecks,
-    MessageSquare,
-    Settings,
-    ShieldCheck,
-    Tags,
-    Upload,
-    UserCheck,
-    UserPlus,
-    Users,
-} from 'lucide-react';
+import { Activity, ArrowLeftRight, BookOpen, Boxes, Contact, Download, FileCode, FileText, FileWarning, History, KeyRound, LayoutGrid, ListChecks, MailPlus, MessageSquare, Settings, ShieldAlert, ShieldCheck, Tags, Upload, UserCheck, UserPlus, Users } from 'lucide-react';
 import AppLogo from './app-logo';
 
 export function AppSidebar() {
@@ -86,6 +64,17 @@ export function AppSidebar() {
     if (can('import_orphans')) {
         fileItems.push({ title: t('Import orphan files'), url: '/files/orphans', icon: FileWarning });
     }
+    if (can('release_quarantined_files')) {
+        // Amber rather than the usual badge colour: the others count work
+        // waiting, this one counts something that went wrong.
+        fileItems.push({
+            title: t('Quarantine'),
+            url: '/files/quarantine',
+            icon: ShieldAlert,
+            badge: pending.quarantine,
+            badgeTone: 'warning',
+        });
+    }
     if (can('moderate_comments')) {
         // Just "Comments" — the old "Comments awaiting approval" wrapped
         // and pushed its own count badge out of the sidebar, and the screen
@@ -118,6 +107,19 @@ export function AppSidebar() {
             title: t('Custom fields'),
             url: '/client-custom-fields',
             icon: ListChecks,
+        });
+    }
+
+    if (can('create_clients')) {
+        // No badge, unlike the two queues below it: an outstanding
+        // invitation is waiting on the person who was invited, not on
+        // anybody here. A number beside this would say "you have three
+        // things to do" about three things nobody in this installation can
+        // act on.
+        clientItems.push({
+            title: t('Invitations'),
+            url: '/clients/invitations',
+            icon: MailPlus,
         });
     }
 
@@ -241,6 +243,7 @@ export function AppSidebar() {
             { title: t('Storage'), url: '/system/settings/storage', when: settings && capabilities.includes('storage.configure') },
             { title: t('Downloads'), url: '/system/settings/downloads', when: settings },
             { title: t('File retention'), url: '/system/settings/file-retention', when: settings },
+            { title: t('Virus scanning'), url: '/system/settings/virus-scanning', when: settings },
             { title: t('Comments'), url: '/system/settings/comments', when: settings },
             { title: t('Public listing'), url: '/system/settings/public-listing', when: settings },
             { title: t('Privacy'), url: '/system/settings/privacy', when: settings },
